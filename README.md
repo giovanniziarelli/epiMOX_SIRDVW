@@ -9,11 +9,11 @@ Code architecture
 - **Tests**: this folder contains a template folder **SIRDVW_age_template**, which in turn contains necessary input file (*input.inp*) and parameters file (*parameters_latest.csv*). Those two files are necessary in order to run tests;
 - **util**: it contains all the necessary dependancies for applying the code to the Italian 2020-2022 SARS-CoV-2 pandemic;
 - *epiMOX_OC_class.py*: this is the main function for solving the optimal control problem. After setting the chosen flags in the *epi/SIRDVW.py* file, the code runs until the tolerance criterion has been fulfilled or the maximum number of iterations has been reached. Once in the major folder, the code can be run as `python3 epiMOX_OC_class.py Tests/[folder name]`;
-
-- *epiMOX_direct_class.py*
-- *plot_MCMC_SIRDVW_age.py*
+- *epiMOX_direct_class.py*: this function hs to be run whenever one wants to solve only the direct problem or to calibrate the parameters. After adjusting properly the input and parameters files, it can be compiled and executed as `python3 epiMOX_class.py Tests/[folder name]`;
+- *MCMC_postprocess_SIRDVW.py*: this 
+- *plot_MCMC_SIRDVW_age.py*: this 
 - *plot_single_scenario.py*
-- *MCMC_postprocess_SIRDVW.py*
+
 
 Mails and Contacts:
 --
