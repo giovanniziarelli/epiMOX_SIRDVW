@@ -5,7 +5,7 @@ This *python* code has been developed from the epiMOX research group at Politecn
 
 Code architecture
 --
-- **epi**
+- **epi**: in this folder you will find the main methods and functions for the *Montecarlo Markov Chain* (MCMC) method adopted for calibrating the transmission rate of the model, together with the class SIRDVW implementing the methods for solving the state problem, the adjoint one and for solving the Optimal control problem (method `optimal_control`)
 - **Tests**
 - **util**
 - *epiMOX_OC_class.py*
