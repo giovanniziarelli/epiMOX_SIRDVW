@@ -17,11 +17,15 @@ Code architecture
 
 Mails and Contacts:
 --
-- Giovanni Ziarelli - giovanni.ziarelli@polimi.it
-- Marco Verani - marco.verani@polimi.it
-- Nicola Parolini - nicola.parolini@polimi.it
-- Luca Dede' - luca.dede@polimi.it
-- Alfio Quarteroni - alfio.quarteroni@polimi.it
+Giovanni Ziarelli, PhD student in Numerical Analysis at Politecnico di Milano - giovanni.ziarelli@polimi.it
+
+Marco Verani, Full time professor in Numerical Analysis at Politecnico di Milano - marco.verani@polimi.it
+
+Nicola Parolini, Associate professor in Numerical Analysis at Politecnico di Milano - nicola.parolini@polimi.it
+
+Luca Dede', Associate professor in Numerical Analysis at Politecnico di Milano - luca.dede@polimi.it
+
+Alfio Quarteroni, Full time professor in Numerical Analysis at Politecnico di Milano and Emeritus professor at EPFL - alfio.quarteroni@polimi.it
 
 
 
