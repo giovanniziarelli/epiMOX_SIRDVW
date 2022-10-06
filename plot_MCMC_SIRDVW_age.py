@@ -33,13 +33,11 @@ if __name__ == '__main__':
     fquantile_df = pd.read_json(ResultsFilePath + '/simdf_MCMC_025.json')
     lquantile_df = pd.read_json(ResultsFilePath + '/simdf_MCMC_975.json')
     simdf = pd.read_hdf(ResultsFilePath + '/simdf.h5')
-    print(simdf)
  
     medians_age = []
     fquant_age = []
     lquant_age = []
     count_times = len(Counter(list(simdf.date)).values())
-    print(count_times)
     for i in range(6):
         medians_age.append(median_df[i*count_times: (i+1)*count_times])
         fquant_age.append(fquantile_df[i*count_times : (i+1) * count_times])
@@ -106,24 +104,13 @@ if __name__ == '__main__':
     eData = eData.reset_index(drop=True)
     eData = converter('SIRDVW', eData, country, Nc)
     eData = eData.reset_index(drop=True)
-          #perc = pd.read_csv(f'~/dpc-covid-data/SUIHTER/stato_clinico.csv')
-    #eData = eData[simdf[simdf['Age'] == '0-19'].date[0]:simdf[simdf['Age'] == '0-19'].date[count_times*6-6]]
     perc = pd.read_csv(f'~/dpc-covid-data/SUIHTER/stato_clinico_SIRDVW.csv')
-    #perc = pd.read_csv(f'https://raw.githubusercontent.com/giovanniardenghi/dpc-covid-data/main/SUIHTER/stato_clinico_{model}.csv')
-    #print('perc', perc)
-    #perc = perc[(perc['Data']>=DPC_start) & (perc['Data']<=DPC_end)]
-    print(type(DPC_end))
     perc = perc[(perc['Data']>=DPC_start) & (perc['Data']<=Tf_data.strftime("%Y-%m-%d"))] 
-    #perc = perc[(perc['Data']>=DPC_start) & (perc['Data']<=DPC_end)] 
     Ns = 6
     eData = pd.DataFrame(np.repeat(eData.values,Ns,axis=0),columns=eData.columns)
     eData[perc.columns[2:]] = eData[perc.columns[2:]].mul(perc[perc.columns[2:]].values)
     eData['Age'] = perc['Età'].values
     eData.sort_values(by=['Age','time'])
-    #print(eData['Infected'])
- 
-    #eData = eData[simdf[simdf['Age'] == '0-19'].date[0]:simdf[simdf['Age'] == '0-19'].date[count_times*6-6]]
-    print(eData) 
     #############################################
 
     int_colors = [(1.0, 0.6, 0.6), (1.0, 0.6, 0.6), (0.6, 0.6, 1.0), (0.6, 1.0, 0.6), (1.0, 1.0, 0.6)]
@@ -134,20 +121,6 @@ if __name__ == '__main__':
     linetype=['--','-','-','-','-']
     linetype=['-','-','-','-','-','-']
 
-    ## Modify here to change labels ##
-
-    #scenari = [r'With $\delta$ variant']
-    scenari = ['Green pass imposed at 100%']
-    #scenari = ['Model with vaccines']
-    #intervals[0][5]['credible'] = np.diff(intervals[0][5]['credible'],axis=1)
-    #pymcmcstat.plotting.MCMCPlotting.plot_density_panel(chains, names=None, hist_on=False, figsizeinches=None, return_kde=False)
-    #print(simdf.groupby(['time']).sum())
-    #print(fquantile_df.index)
-    #print(eData.index)
-    
-
-
-    
     MCMCpath = ResultsFilePath + '/MCMC/'	
     if os.path.exists(ResultsFilePath):
         ResultsDict = chproc.load_serial_simulation_results(MCMCpath, json_file='results_dict.json', extension='txt')
@@ -156,12 +129,8 @@ if __name__ == '__main__':
         names = ResultsDict['names']
     else:
         sys.exit('Error - MCMC folder in ' + ResultsFilePath + ' not found. Exit.')
-    print(chain.shape)
-    print(names)
     list_names = [int(i*6) for i in range(21)]
     list_names_end = [int(126 + x) for x in range(13)]
-    #list_names.extend(list_names_end)
-    print(list_names)
     burnin = 5000
     for i in range(len(list_names)):
         chain1 = chain[burnin:, i].reshape((20000-burnin,1))
@@ -174,17 +143,6 @@ if __name__ == '__main__':
     plt.savefig(ResultsFilePath + 'img/' +'t_rec.png')
     plt.show()
     
-    #burnin = 10000
-    #chain2 = chain[burnin:, list_names_end]
-     
-    #mcp.plot_chain_panel(chain2 , names[list_names_end])
-    #plt.show()
-    #mcp.plot_density_panel(chain2 , names[list_names_end] )
-    #plt.show()
-    #mcp.plot_chain_panel(chain2, names[list_names_end])
-    
-    #plt.show()
-
     Infected = simdf.Infected
     Rec = simdf.Recovered
     Dec = simdf.Deceased
@@ -193,9 +151,6 @@ if __name__ == '__main__':
    ##################################
     titoli = ['Isolated','Deceased']
     
-    print(np.array(medians_age[0].Positivi) + np.array(medians_age[1].Positivi))
-    
-
     date = eData[eData.Age == '0-19'].data
     medians_inf = np.zeros(len(date))
     fquant_inf = np.zeros(len(date))
@@ -216,10 +171,7 @@ if __name__ == '__main__':
     fig,axes1 = plt.subplots(1,2, figsize = (11, 4))
     baseline = 0.0 * np.ones(len(date))
     ages = ['0-19', '20-39', '40-59', '60-79', '80-89', '90+']
-    print(date)
-    print('OK')
     datestr = [day_init + datetime.timedelta(k) for k in range(len(date))]
-    print(datestr)
 
     colors = plt.cm.cool(np.linspace(0, 1, 5))
     codes = ['0-19', '20-39', '40-59', '60-79', '80+']
@@ -228,31 +180,22 @@ if __name__ == '__main__':
             perc = (np.array(medians_age[k].Positivi)+np.array(medians_age[k+1].Positivi)) / medians_inf
         else:
             perc = np.array(medians_age[k].Positivi) / medians_inf
-        print(perc)
-        print(baseline)
         axes1[0].plot(datestr,perc + baseline, color = colors[k])
         axes1[0].fill_between(datestr, baseline, perc + baseline, color = colors[k], alpha = 0.5)
         baseline = baseline + perc
-    #axes1.grid()
     axes1[0].set_title('Calibrated model')
     axes1[0].set_xticks((day_init + datetime.timedelta(0), day_init + datetime.timedelta(28), day_init + datetime.timedelta(56), day_init + datetime.timedelta(84), day_init + datetime.timedelta(112), day_init + datetime.timedelta(140))) 
     axes1[0].tick_params(axis='both', which='major', labelsize=7)
     axes1[0].tick_params(axis='both', which='minor', labelsize=7)
-    #axes1[0].legend(ages)
     baseline = 0.0 * np.ones(len(date))
     for k in range(5):
         if k ==4:
             perc = (np.array(eData[eData.Age == ages[k]].Infected)+np.array(eData[eData.Age == ages[k+1]].Infected)) / np.array(eData.groupby(by = 'data').Infected.sum())
         else:
             perc = np.array(eData[eData.Age == ages[k]].Infected) / np.array(eData.groupby(by = 'data').Infected.sum())
-        print(perc.shape)
-        print(baseline.shape)
-        print('QUI')
         axes1[1].plot(datestr,perc+ baseline, color = colors[k])
         axes1[1].fill_between(date, np.array(baseline, dtype = 'float'), np.array(perc + baseline, dtype = 'float'), color = colors[k], alpha = 0.5)
-        #axes1[1].fill_between(datestr, baseline, perc + baseline, color = colors[k], alpha =0.1)
         baseline = baseline + perc
-    #axes1[1].legend(ages)
     axes1[1].set_title('DPC data')
     axes1[1].tick_params(axis='both', which='major', labelsize=7)
     axes1[1].tick_params(axis='both', which='minor', labelsize=7)
@@ -269,31 +212,22 @@ if __name__ == '__main__':
             perc = (np.array(medians_age[k].Deceduti)+np.array(medians_age[k+1].Deceduti)) / medians_dec
         else:
             perc = np.array(medians_age[k].Deceduti) / medians_dec
-        print(perc)
-        print(baseline)
         axess1[0].plot(datestr,perc + baseline, color = colors[k])
         axess1[0].fill_between(datestr, baseline, perc + baseline, color = colors[k], alpha = 0.5)
         baseline = baseline + perc
-    #axess1.grid()
     axess1[0].set_title('Calibrated model')
     axess1[0].set_xticks((day_init + datetime.timedelta(0), day_init + datetime.timedelta(28), day_init + datetime.timedelta(56), day_init + datetime.timedelta(84), day_init + datetime.timedelta(112), day_init + datetime.timedelta(140))) 
     axess1[0].tick_params(axis='both', which='major', labelsize=7)
     axess1[0].tick_params(axis='both', which='minor', labelsize=7)
-    #axess1[0].legend(ages)
     baseline = 0.0 * np.ones(len(date))
     for k in range(5):
         if k ==4:
             perc = (np.array(eData[eData.Age == ages[k]].Deceased)+np.array(eData[eData.Age == ages[k+1]].Deceased)) / np.array(eData.groupby(by = 'data').Deceased.sum())
         else:
             perc = np.array(eData[eData.Age == ages[k]].Deceased) / np.array(eData.groupby(by = 'data').Deceased.sum())
-        print(perc.shape)
-        print(baseline.shape)
-        print('QUI')
         axess1[1].plot(datestr,perc+ baseline, color = colors[k])
         axess1[1].fill_between(date, np.array(baseline, dtype = 'float'), np.array(perc + baseline, dtype = 'float'), color = colors[k], alpha = 0.5)
-        #axess1[1].fill_between(datestr, baseline, perc + baseline, color = colors[k], alpha =0.1)
         baseline = baseline + perc
-    #axess1[1].legend(ages)
     axess1[1].set_title('DPC data')
     axess1[1].set_xticks((day_init + datetime.timedelta(0), day_init + datetime.timedelta(28), day_init + datetime.timedelta(56), day_init + datetime.timedelta(84), day_init + datetime.timedelta(112), day_init + datetime.timedelta(140))) 
     axess1[1].tick_params(axis='both', which='major', labelsize=7)
@@ -307,7 +241,6 @@ if __name__ == '__main__':
     fig, axes = plt.subplots(1,1, figsize = (8,7))
     Deceduti_tot = eData.groupby(by = 'data').Deceased.sum()
     
-    print(simdf)
     axes.plot(datestr, Deceduti_tot, '*k')
     axes.plot(datestr, medians_dec, 'r')
     axes.legend(['DPC data', 'MCMC median'])
@@ -322,7 +255,6 @@ if __name__ == '__main__':
     ax = [plt.subplot(231+x) for x in range(5)]
     ax[0].plot(datestr, eData[eData.Age == '0-19'].Infected, '--k')
     ax[0].plot(eData[eData.Age == '0-19'].data, medians_age[0].Positivi, 'b')
-#    ax[0].plot(simdf.date,Infected, 'b')
     ax[0].fill_between(eData[eData.Age == '0-19'].data, fquant_age[0].Positivi, lquant_age[0].Positivi,\
             alpha = 0.1, color = 'b')
     ax[0].plot(datestr, simdf[simdf.Age == '0-19'].Infected, 'green')
@@ -333,7 +265,6 @@ if __name__ == '__main__':
 
     ax[1].plot(date, eData[eData.Age == '20-39'].Infected, '--k')
     ax[1].plot(date, medians_age[1].Positivi, 'b')
-#    ax10].plot(simdf.date,Infected, 'b')
     ax[1].fill_between(date, fquant_age[1].Positivi, lquant_age[1].Positivi,\
             alpha = 0.1, color = 'b')
     ax[1].plot(date, simdf[simdf.Age == '20-39'].Infected, 'green')
@@ -343,7 +274,6 @@ if __name__ == '__main__':
 
     ax[2].plot(date, eData[eData.Age == '40-59'].Infected, '--k')
     ax[2].plot(date, medians_age[2].Positivi, 'b')
-#    ax20].plot(simdf.date,Infected, 'b')
     ax[2].fill_between(date, fquant_age[2].Positivi, lquant_age[2].Positivi,\
             alpha = 0.1, color = 'b')
     ax[2].plot(date, simdf[simdf.Age == '40-59'].Infected, 'green')
@@ -353,7 +283,6 @@ if __name__ == '__main__':
 
     ax[3].plot(date, eData[eData.Age == '60-79'].Infected, '--k')
     ax[3].plot(date, medians_age[3].Positivi, 'b')
-#    ax30].plot(simdf.date,Infected, 'b')
     ax[3].fill_between(date, fquant_age[3].Positivi, lquant_age[3].Positivi,\
             alpha = 0.1, color = 'b')
     ax[3].plot(date, simdf[simdf.Age == '60-79'].Infected, 'green')
@@ -363,7 +292,6 @@ if __name__ == '__main__':
 
     ax[4].plot(date, np.array(eData[eData.Age == '80-89'].Infected) + np.array(eData[eData.Age == '90+'].Infected), '--k')
     ax[4].plot(date, np.array(medians_age[4].Positivi) + np.array(medians_age[5].Positivi), 'b')
-#    ax40].plot(simdf.date,Infected, 'b')
     ax[4].fill_between(date, np.array(fquant_age[4].Positivi) + np.array(fquant_age[5].Positivi), np.array(lquant_age[4].Positivi) + np.array(lquant_age[5].Positivi),\
             alpha = 0.1, color = 'b')
     ax[4].plot(date, np.array(simdf[simdf.Age == '80-89'].Infected) + np.array(simdf[simdf.Age == '90+'].Infected), 'green')
@@ -376,9 +304,8 @@ if __name__ == '__main__':
         x.xaxis.set_major_locator(mpl.dates.MonthLocator())
         x.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d/%m'))
         x.tick_params(axis='both', which='major', labelsize='small')
-        #x.set_xlim(right=datetime.date(day=1,month=8,year=2021))
         handles, labels = x.get_legend_handles_labels()
-        #x.legend(handles, labels, loc="upper left", fontsize = 'small')
+    
     fig = plt.gcf()
     fig.set_size_inches((19.2,18.2), forward=False)
     plt.show()
@@ -391,7 +318,6 @@ if __name__ == '__main__':
     ax = [plt.subplot(231+x) for x in range(5)]
     ax[0].plot(datestr, eData[eData.Age == '0-19'].Deceased, '--k')
     ax[0].plot(eData[eData.Age == '0-19'].data, medians_age[0].Deceduti, 'r')
-#    ax[0].plot(simdf.date,Deceased, 'r')
     ax[0].fill_between(eData[eData.Age == '0-19'].data, fquant_age[0].Deceduti, lquant_age[0].Deceduti,\
             alpha = 0.1, color = 'r')
     ax[0].plot(datestr, simdf[simdf.Age == '0-19'].Deceased, 'orange')
@@ -402,7 +328,6 @@ if __name__ == '__main__':
 
     ax[1].plot(date, eData[eData.Age == '20-39'].Deceased, '--k')
     ax[1].plot(date, medians_age[1].Deceduti, 'r')
-#    ax10].plot(simdf.date,Deceased, 'r')
     ax[1].fill_between(date, fquant_age[1].Deceduti, lquant_age[1].Deceduti,\
             alpha = 0.1, color = 'r')
     ax[1].plot(date, simdf[simdf.Age == '20-39'].Deceased, 'orange')
@@ -412,7 +337,6 @@ if __name__ == '__main__':
 
     ax[2].plot(date, eData[eData.Age == '40-59'].Deceased, '--k')
     ax[2].plot(date, medians_age[2].Deceduti, 'r')
-#    ax20].plot(simdf.date,Deceased, 'r')
     ax[2].fill_between(date, fquant_age[2].Deceduti, lquant_age[2].Deceduti,\
             alpha = 0.1, color = 'r')
     ax[2].plot(date, simdf[simdf.Age == '40-59'].Deceased, 'orange')
@@ -422,7 +346,6 @@ if __name__ == '__main__':
 
     ax[3].plot(date, eData[eData.Age == '60-79'].Deceased, '--k')
     ax[3].plot(date, medians_age[3].Deceduti, 'r')
-#    ax30].plot(simdf.date,Deceased, 'r')
     ax[3].fill_between(date, fquant_age[3].Deceduti, lquant_age[3].Deceduti,\
             alpha = 0.1, color = 'r')
     ax[3].plot(date, simdf[simdf.Age == '60-79'].Deceased, 'orange')
@@ -432,7 +355,6 @@ if __name__ == '__main__':
 
     ax[4].plot(date, np.array(eData[eData.Age == '80-89'].Deceased) + np.array(eData[eData.Age == '90+'].Deceased), '--k')
     ax[4].plot(date, np.array(medians_age[4].Deceduti) + np.array(medians_age[5].Deceduti), 'r')
-#    ax40].plot(simdf.date,Deceased, 'r')
     ax[4].fill_between(date, np.array(fquant_age[4].Deceduti) + np.array(fquant_age[5].Deceduti), np.array(lquant_age[4].Deceduti) + np.array(lquant_age[5].Deceduti),\
             alpha = 0.1, color = 'r')
     ax[4].plot(date, np.array(simdf[simdf.Age == '80-89'].Deceased) + np.array(simdf[simdf.Age == '90+'].Deceased), 'orange')
@@ -445,44 +367,17 @@ if __name__ == '__main__':
         x.xaxis.set_major_locator(mpl.dates.MonthLocator())
         x.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d/%m'))
         x.tick_params(axis='both', which='major', labelsize='small')
-        #x.set_xlim(right=datetime.date(day=1,month=8,year=2021))
         handles, labels = x.get_legend_handles_labels()
-        #x.legend(handles, labels, loc="upper left", fontsize = 'small')
     fig1 = plt.gcf()
     fig1.set_size_inches((19.2,18.2), forward=False)
     plt.show()
     fig1.savefig(ResultsFilePath + '/img/deceased.png',dpi=300)
     pl.dump(f, open(ResultsFilePath + '/img/deceased.ptfig', 'wb'))
 
-
-
-
-    f = plt.figure(8)
-   #print(median_df.Infetti.values.shape)
-   #print(np.reshape(median_df.Infetti.values, (152, 6)))
-   #
-   #med_inf = np.sum(np.reshape(median_df.Infetti.values, (152, 6)), axis =1)
-   #
-   #med = np.zeros(len(date))
-   #low = np.zeros(len(date))
-   #up  = np.zeros(len(date))
-   #for i  in range(6):
-   #    med += medians_age[i].Infetti
-   #    low += lquant_age[i].Infetti
-   #    up += fquant_age[i].Infetti
-   #print('med', median_df)
-   #print('low', low)
-   #print('up', up)
-   #plt.plot(date, eData.groupby(by = 'data').Infected.sum(), '--k')
-   #plt.plot(date, median_inf, '--b')
-   #plt.fill_between(date, up, low, alpha = 0.2, color = 'b')
-   #plt.show()
-
     f = plt.figure(2)
     ax = [plt.subplot(231+x) for x in range(6)]
     ax[0].plot(date, eData[eData.Age == '0-19'].Deceased, '--k')
     ax[0].plot(date, medians_age[0].Deceduti, '--b')
-#    ax[0].plot(simdf.date,Infected, '--b')
     ax[0].fill_between(date, fquant_age[0].Deceduti, lquant_age[0].Deceduti,\
             alpha = 0.2, color = 'b')
     ax[0].plot(date, simdf[simdf.Age == '0-19'].Deceased, '--r')
@@ -491,7 +386,6 @@ if __name__ == '__main__':
 
     ax[1].plot(date, eData[eData.Age == '20-39'].Deceased, '--k')
     ax[1].plot(date, medians_age[1].Deceduti, '--b')
-#    ax10].plot(simdf.date,Infected, '--b')
     ax[1].fill_between(date, fquant_age[1].Deceduti, lquant_age[1].Deceduti,\
             alpha = 0.2, color = 'b')
     ax[1].plot(date, simdf[simdf.Age == '20-39'].Deceased, '--r')
@@ -500,7 +394,6 @@ if __name__ == '__main__':
 
     ax[2].plot(date, eData[eData.Age == '40-59'].Deceased, '--k')
     ax[2].plot(date, medians_age[2].Deceduti, '--b')
-#    ax20].plot(simdf.date,Infected, '--b')
     ax[2].fill_between(date, fquant_age[2].Deceduti, lquant_age[2].Deceduti,\
             alpha = 0.2, color = 'b')
     ax[2].plot(date, simdf[simdf.Age == '40-59'].Deceased, '--r')
@@ -509,7 +402,6 @@ if __name__ == '__main__':
 
     ax[3].plot(date, eData[eData.Age == '60-79'].Deceased, '--k')
     ax[3].plot(date, medians_age[3].Deceduti, '--b')
-#    ax30].plot(simdf.date,Infected, '--b')
     ax[3].fill_between(date, fquant_age[3].Deceduti, lquant_age[3].Deceduti,\
             alpha = 0.2, color = 'b')
     ax[3].plot(date, simdf[simdf.Age == '60-79'].Deceased, '--r')
@@ -518,7 +410,6 @@ if __name__ == '__main__':
 
     ax[4].plot(date, eData[eData.Age == '80-89'].Deceased, '--k')
     ax[4].plot(date, medians_age[4].Deceduti, '--b')
-#    ax40].plot(simdf.date,Infected, '--b')
     ax[4].fill_between(date, fquant_age[4].Deceduti, lquant_age[4].Deceduti,\
             alpha = 0.2, color = 'b')
     ax[4].plot(date, simdf[simdf.Age == '80-89'].Deceased, '--r')
@@ -527,7 +418,6 @@ if __name__ == '__main__':
 
     ax[5].plot(date, eData[eData.Age == '90+'].Deceased, '--k')
     ax[5].plot(date, medians_age[5].Deceduti, '--b')
-#    ax50].plot(simdf.date,Infected, '--b')
     ax[5].fill_between(date, fquant_age[5].Deceduti, lquant_age[5].Deceduti,\
             alpha = 0.2, color = 'b')
     ax[5].plot(date, simdf[simdf.Age == '90+'].Deceased, '--r')
@@ -539,75 +429,51 @@ if __name__ == '__main__':
         x.xaxis.set_major_locator(mpl.dates.MonthLocator())
         x.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d/%m'))
         x.tick_params(axis='both', which='major', labelsize='small')
-        #x.set_xlim(right=datetime.date(day=1,month=8,year=2021))
         handles, labels = x.get_legend_handles_labels()
-        #x.legend(handles, labels, loc="upper left", fontsize = 'large')
     fig = plt.gcf()
     fig.set_size_inches((19.2,18.2), forward=False)
     plt.show()
     fig.savefig(ResultsFilePath + '/img/deceased.png',dpi=300)
     pl.dump(f, open(ResultsFilePath + '/img/deceased.ptfig', 'wb'))
     
-   #day_init_vaccines = day_init - pd.Timedelta(14, 'days')
-   #vaccines = pd.read_csv('https://raw.githubusercontent.com/giovanniardenghi/dpc-covid-data/main/data/vaccines_age.csv')
-   ##print(vaccines.index)
-#va#cines = pd.read_csv('~/dpc-covid-data/data/vaccini_regioni/'+country+'.csv')
-   #vaccines['data'] = pd.to_datetime(vaccines.data)
-   #vaccines.set_index(['data', 'eta'],inplace=True)
-   #vaccines.fillna(0,inplace=True)
-   ##vaccines[['prima_dose','seconda_dose']]=0
-   #vaccines_init = vaccines[:day_init_vaccines-pd.Timedelta(1,'day')].sum()
-   #vaccines = vaccines.loc[day_init_vaccines:]
     f = plt.figure(3)
     ax = [plt.subplot(231+x) for x in range(6)]
-    #ax[0].plot(date, eData[eData.Age == '0-19'].VaccinatedFirst, '--k')
     ax[0].plot(date, medians_age[0]['Vaccinati Prima Dose'], '--b')
-#    ax[0].plot(simdf.date,Infected, '--b')
     ax[0].fill_between(date, fquant_age[0]['Vaccinati Prima Dose'], lquant_age[0]['Vaccinati Prima Dose'],\
             alpha = 0.2, color = 'b')
     ax[0].plot(date, simdf[simdf.Age == '0-19'].VaccinatedFirst, '--r')
     ax[0].set_title('Vaccinated First dose 0-19', fontsize = 9)
     ax[0].grid()
 
-    #ax[1].plot(date, eData[eData.Age == '20-39'].VaccinatedFirst, '--k')
     ax[1].plot(date, medians_age[1]['Vaccinati Prima Dose'], '--b')
-#    ax10].plot(simdf.date,Infected, '--b')
     ax[1].fill_between(date, fquant_age[1]['Vaccinati Prima Dose'], lquant_age[1]['Vaccinati Prima Dose'],\
             alpha = 0.2, color = 'b')
     ax[1].plot(date, simdf[simdf.Age == '20-39'].VaccinatedFirst, '--r')
     ax[1].set_title('Vaccinated First 20-39', fontsize = 9)
     ax[1].grid()
 
-    #ax[2].plot(date, eData[eData.Age == '40-59'].VaccinatedFirst, '--k')
     ax[2].plot(date, medians_age[2]['Vaccinati Prima Dose'], '--b')
-#    ax20].plot(simdf.date,Infected, '--b')
     ax[2].fill_between(date, fquant_age[2]['Vaccinati Prima Dose'], lquant_age[2]['Vaccinati Prima Dose'],\
             alpha = 0.2, color = 'b')
     ax[2].plot(date, simdf[simdf.Age == '40-59'].VaccinatedFirst, '--r')
     ax[2].set_title('Vaccinated First 40-59', fontsize = 9)
     ax[2].grid()
 
-    #ax[3].plot(date, eData[eData.Age == '60-79'].VaccinatedFirst, '--k')
     ax[3].plot(date, medians_age[3]['Vaccinati Prima Dose'], '--b')
-#    ax30].plot(simdf.date,Infected, '--b')
     ax[3].fill_between(date, fquant_age[3]['Vaccinati Prima Dose'], lquant_age[3]['Vaccinati Prima Dose'],\
             alpha = 0.2, color = 'b')
     ax[3].plot(date, simdf[simdf.Age == '60-79'].VaccinatedFirst, '--r')
     ax[3].set_title('Vaccinated First 60-79', fontsize = 9)
     ax[3].grid()
 
-    #ax[4].plot(date, eData[eData.Age == '80-89'].VaccinatedFirst, '--k')
     ax[4].plot(date, medians_age[4]['Vaccinati Prima Dose'], '--b')
-#    ax40].plot(simdf.date,Infected, '--b')
     ax[4].fill_between(date, fquant_age[4]['Vaccinati Prima Dose'], lquant_age[4]['Vaccinati Prima Dose'],\
             alpha = 0.2, color = 'b')
     ax[4].plot(date, simdf[simdf.Age == '80-89'].VaccinatedFirst, '--r')
     ax[4].set_title('Vaccinated First 80-89', fontsize = 9)
     ax[4].grid()
 
-    #ax[5].plot(date, eData[eData.Age == '90+'].VaccinatedFirst, '--k')
     ax[5].plot(date, medians_age[5]['Vaccinati Prima Dose'], '--b')
-#    ax50].plot(simdf.date,Infected, '--b')
     ax[5].fill_between(date, fquant_age[5]['Vaccinati Prima Dose'], lquant_age[5]['Vaccinati Prima Dose'],\
             alpha = 0.2, color = 'b')
     ax[5].plot(date, simdf[simdf.Age == '90+'].VaccinatedFirst, '--r')
@@ -619,9 +485,7 @@ if __name__ == '__main__':
         x.xaxis.set_major_locator(mpl.dates.MonthLocator())
         x.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d/%m'))
         x.tick_params(axis='both', which='major', labelsize='small')
-        #x.set_xlim(right=datetime.date(day=1,month=8,year=2021))
         handles, labels = x.get_legend_handles_labels()
-        #x.legend(handles, labels, loc="upper left", fontsize = 'large')
     fig = plt.gcf()
     fig.set_size_inches((19.2,18.2), forward=False)
     plt.show()
@@ -631,54 +495,42 @@ if __name__ == '__main__':
 
     f = plt.figure(4)
     ax = [plt.subplot(231+x) for x in range(6)]
-    #ax[0].plot(date, eData[eData.Age == '0-19'].VaccinatedSecond, '--k')
     ax[0].plot(date, medians_age[0]['Vaccinati Ciclo Completo'], '--b')
-#    ax[0].plot(simdf.date,Infected, '--b')
     ax[0].fill_between(date, fquant_age[0]['Vaccinati Ciclo Completo'], lquant_age[0]['Vaccinati Ciclo Completo'],\
             alpha = 0.2, color = 'b')
     ax[0].plot(date, simdf[simdf.Age == '0-19'].VaccinatedSecond, '--r')
     ax[0].set_title('Vaccinated Second 0-19', fontsize = 9)
     ax[0].grid()
 
-    #ax[1].plot(date, eData[eData.Age == '20-39'].VaccinatedSecond, '--k')
     ax[1].plot(date, medians_age[1]['Vaccinati Ciclo Completo'], '--b')
-#    ax10].plot(simdf.date,Infected, '--b')
     ax[1].fill_between(date, fquant_age[1]['Vaccinati Ciclo Completo'], lquant_age[1]['Vaccinati Ciclo Completo'],\
             alpha = 0.2, color = 'b')
     ax[1].plot(date, simdf[simdf.Age == '20-39'].VaccinatedSecond, '--r')
     ax[1].set_title('Vaccinated Second 20-39', fontsize = 9)
     ax[1].grid()
 
-    #ax[2].plot(date, eData[eData.Age == '40-59'].VaccinatedSecond, '--k')
     ax[2].plot(date, medians_age[2]['Vaccinati Ciclo Completo'], '--b')
-#    ax20].plot(simdf.date,Infected, '--b')
     ax[2].fill_between(date, fquant_age[2]['Vaccinati Ciclo Completo'], lquant_age[2]['Vaccinati Ciclo Completo'],\
             alpha = 0.2, color = 'b')
     ax[2].plot(date, simdf[simdf.Age == '40-59'].VaccinatedSecond, '--r')
     ax[2].set_title('Vaccinated Second 40-59', fontsize = 9)
     ax[2].grid()
 
-    #ax[3].plot(date, eData[eData.Age == '60-79'].VaccinatedSecond, '--k')
     ax[3].plot(date, medians_age[3]['Vaccinati Ciclo Completo'], '--b')
-#    ax30].plot(simdf.date,Infected, '--b')
     ax[3].fill_between(date, fquant_age[3]['Vaccinati Ciclo Completo'], lquant_age[3]['Vaccinati Ciclo Completo'],\
             alpha = 0.2, color = 'b')
     ax[3].plot(date, simdf[simdf.Age == '60-79'].VaccinatedSecond, '--r')
     ax[3].set_title('Vaccinated Second 60-79', fontsize = 9)
     ax[3].grid()
 
-    #ax[4].plot(date, eData[eData.Age == '80-89'].VaccinatedSecond, '--k')
     ax[4].plot(date, medians_age[4]['Vaccinati Ciclo Completo'], '--b')
-#    ax40].plot(simdf.date,Infected, '--b')
     ax[4].fill_between(date, fquant_age[4]['Vaccinati Ciclo Completo'], lquant_age[4]['Vaccinati Ciclo Completo'],\
             alpha = 0.2, color = 'b')
     ax[4].plot(date, simdf[simdf.Age == '80-89'].VaccinatedSecond, '--r')
     ax[4].set_title('Vaccinated Second 80-89', fontsize = 9)
     ax[4].grid()
 
-    #ax[5].plot(date, eData[eData.Age == '90+'].VaccinatedSecond, '--k')
     ax[5].plot(date, medians_age[5]['Vaccinati Ciclo Completo'], '--b')
-#    ax50].plot(simdf.date,Infected, '--b')
     ax[5].fill_between(date, fquant_age[5]['Vaccinati Ciclo Completo'], lquant_age[5]['Vaccinati Ciclo Completo'],\
             alpha = 0.2, color = 'b')
     ax[5].plot(date, simdf[simdf.Age == '90+'].VaccinatedSecond, '--r')
@@ -690,9 +542,7 @@ if __name__ == '__main__':
         x.xaxis.set_major_locator(mpl.dates.MonthLocator())
         x.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d/%m'))
         x.tick_params(axis='both', which='major', labelsize='small')
-        #x.set_xlim(right=datetime.date(day=1,month=8,year=2021))
         handles, labels = x.get_legend_handles_labels()
-        #x.legend(handles, labels, loc="upper left", fontsize = 'large')
     fig = plt.gcf()
     fig.set_size_inches((19.2,18.2), forward=False)
     plt.show()
@@ -701,54 +551,42 @@ if __name__ == '__main__':
     
     f = plt.figure(5)
     ax = [plt.subplot(231+x) for x in range(6)]
-    #ax[0].plot(date, eData[eData.Age == '0-19'].Suscept, '--k')
     ax[0].plot(date, medians_age[0].Suscettibili, '--b')
-#    ax[0].plot(simdf.date,Infected, '--b')
     ax[0].fill_between(date, fquant_age[0].Suscettibili, lquant_age[0].Suscettibili,\
             alpha = 0.2, color = 'b')
     ax[0].plot(date, simdf[simdf.Age == '0-19'].Suscept, '--r')
     ax[0].set_title('Susceptibles 0-19', fontsize = 9)
     ax[0].grid()
 
-    #ax[1].plot(date, eData[eData.Age == '20-39'].Suscept, '--k')
     ax[1].plot(date, medians_age[1].Suscettibili, '--b')
-#    ax10].plot(simdf.date,Infected, '--b')
     ax[1].fill_between(date, fquant_age[1].Suscettibili, lquant_age[1].Suscettibili,\
             alpha = 0.2, color = 'b')
     ax[1].plot(date, simdf[simdf.Age == '20-39'].Suscept, '--r')
     ax[1].set_title('Susceptibles 20-39', fontsize = 9)
     ax[1].grid()
 
-    #ax[2].plot(date, eData[eData.Age == '40-59'].Deceased, '--k')
     ax[2].plot(date, medians_age[2].Suscettibili, '--b')
-#    ax20].plot(simdf.date,Infected, '--b')
     ax[2].fill_between(date, fquant_age[2].Suscettibili, lquant_age[2].Suscettibili,\
             alpha = 0.2, color = 'b')
     ax[2].plot(date, simdf[simdf.Age == '40-59'].Suscept, '--r')
     ax[2].set_title('Susceptibles 40-59', fontsize = 9)
     ax[2].grid()
 
-    #ax[3].plot(date, eData[eData.Age == '60-79'].Deceased, '--k')
     ax[3].plot(date, medians_age[3].Suscettibili, '--b')
-#    ax30].plot(simdf.date,Infected, '--b')
     ax[3].fill_between(date, fquant_age[3].Suscettibili, lquant_age[3].Suscettibili,\
             alpha = 0.2, color = 'b')
     ax[3].plot(date, simdf[simdf.Age == '60-79'].Suscept, '--r')
     ax[3].set_title('Susceptibles 60-79', fontsize = 9)
     ax[3].grid()
 
-    #ax[4].plot(date, eData[eData.Age == '80-89'].eased, '--k')
     ax[4].plot(date, medians_age[4].Suscettibili, '--b')
-#    ax40].plot(simdf.date,Infected, '--b')
     ax[4].fill_between(date, fquant_age[4].Suscettibili, lquant_age[4].Suscettibili,\
             alpha = 0.2, color = 'b')
     ax[4].plot(date, simdf[simdf.Age == '80-89'].Suscept, '--r')
     ax[4].set_title('Susceptibles 80-89', fontsize = 9)
     ax[4].grid()
 
-    #ax[5].plot(date, eData[eData.Age == '90+'].Deceased, '--k')
     ax[5].plot(date, medians_age[5].Suscettibili, '--b')
-#    ax50].plot(simdf.date,Infected, '--b')
     ax[5].fill_between(date, fquant_age[5].Suscettibili, lquant_age[5].Suscettibili,\
             alpha = 0.2, color = 'b')
     ax[5].plot(date, simdf[simdf.Age == '90+'].Suscept, '--r')
@@ -760,9 +598,7 @@ if __name__ == '__main__':
         x.xaxis.set_major_locator(mpl.dates.MonthLocator())
         x.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d/%m'))
         x.tick_params(axis='both', which='major', labelsize='small')
-        #x.set_xlim(right=datetime.date(day=1,month=8,year=2021))
         handles, labels = x.get_legend_handles_labels()
-        #x.legend(handles, labels, loc="upper left", fontsize = 'large')
     fig = plt.gcf()
     fig.set_size_inches((19.2,18.2), forward=False)
     plt.show()
@@ -771,54 +607,42 @@ if __name__ == '__main__':
     
     f = plt.figure(6)
     ax = [plt.subplot(231+x) for x in range(6)]
-    #ax[0].plot(date, eData[eData.Age == '0-19'].Deceased, '--k')
     ax[0].plot(date, medians_age[0].Guariti, '--b')
-#    ax[0].plot(simdf.date,Infected, '--b')
     ax[0].fill_between(date, fquant_age[0].Guariti, lquant_age[0].Guariti,\
             alpha = 0.2, color = 'b')
     ax[0].plot(date, simdf[simdf.Age == '0-19'].Recovered, '--r')
     ax[0].set_title('Recovered 0-19', fontsize = 9)
     ax[0].grid()
 
-    #ax[1].plot(date, eData[eData.Age == '20-39'].Recovered, '--k')
     ax[1].plot(date, medians_age[1].Guariti, '--b')
-#    ax10].plot(simdf.date,Infected, '--b')
     ax[1].fill_between(date, fquant_age[1].Guariti, lquant_age[1].Guariti,\
             alpha = 0.2, color = 'b')
     ax[1].plot(date, simdf[simdf.Age == '20-39'].Recovered, '--r')
     ax[1].set_title('Recovered 20-39', fontsize = 9)
     ax[1].grid()
 
-    #ax[2].plot(date, eData[eData.Age == '40-59'].Deceased, '--k')
     ax[2].plot(date, medians_age[2].Guariti, '--b')
-#    ax20].plot(simdf.date,Infected, '--b')
     ax[2].fill_between(date, fquant_age[2].Guariti, lquant_age[2].Guariti,\
             alpha = 0.2, color = 'b')
     ax[2].plot(date, simdf[simdf.Age == '40-59'].Recovered, '--r')
     ax[2].set_title('Recovered 40-59', fontsize = 9)
     ax[2].grid()
 
-    #ax[3].plot(date, eData[eData.Age == '60-79'].Deceased, '--k')
     ax[3].plot(date, medians_age[3].Guariti, '--b')
-#    ax30].plot(simdf.date,Infected, '--b')
     ax[3].fill_between(date, fquant_age[3].Guariti, lquant_age[3].Guariti,\
             alpha = 0.2, color = 'b')
     ax[3].plot(date, simdf[simdf.Age == '60-79'].Recovered, '--r')
     ax[3].set_title('Recovered 60-79', fontsize = 9)
     ax[3].grid()
 
-    #ax[4].plot(date, eData[eData.Age == '80-89'].Deceased, '--k')
     ax[4].plot(date, medians_age[4].Guariti, '--b')
-#    ax40].plot(simdf.date,Infected, '--b')
     ax[4].fill_between(date, fquant_age[4].Guariti, lquant_age[4].Guariti,\
             alpha = 0.2, color = 'b')
     ax[4].plot(date, simdf[simdf.Age == '80-89'].Recovered, '--r')
     ax[4].set_title('Recovered 80-89', fontsize = 9)
     ax[4].grid()
 
-    #ax[5].plot(date, eData[eData.Age == '90+'].Deceased, '--k')
     ax[5].plot(date, medians_age[5].Guariti, '--b')
-#    ax50].plot(simdf.date,Infected, '--b')
     ax[5].fill_between(date, fquant_age[5].Guariti, lquant_age[5].Guariti,\
             alpha = 0.2, color = 'b')
     ax[5].plot(date, simdf[simdf.Age == '90+'].Recovered, '--r')
@@ -830,9 +654,7 @@ if __name__ == '__main__':
         x.xaxis.set_major_locator(mpl.dates.MonthLocator())
         x.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d/%m'))
         x.tick_params(axis='both', which='major', labelsize='small')
-        #x.set_xlim(right=datetime.date(day=1,month=8,year=2021))
         handles, labels = x.get_legend_handles_labels()
-        #x.legend(handles, labels, loc="upper left", fontsize = 'large')
     fig = plt.gcf()
     fig.set_size_inches((15.2,10.2), forward=False)
     plt.show()
@@ -867,13 +689,10 @@ if __name__ == '__main__':
     ax[5].grid()
 
     for i,x in enumerate(ax):
-        #x.yaxis.set_major_formatter(mpl.ticker.StrMethodFormatter('{x:.0f}'))
         x.xaxis.set_major_locator(mpl.dates.MonthLocator())
         x.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d/%m'))
         x.tick_params(axis='both', which='major', labelsize='small')
-        #x.set_xlim(right=datetime.date(day=1,month=8,year=2021))
         handles, labels = x.get_legend_handles_labels()
-        #x.legend(handles, labels, loc="upper left", fontsize = 'small')
     fig = plt.gcf()
     fig.set_size_inches((19.2,18.2), forward=False)
     plt.show()
