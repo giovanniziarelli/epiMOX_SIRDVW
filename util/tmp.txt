@@ -1,0 +1,1533 @@
+import numpy as np
+import pandas as pd
+import datetime
+import jax
+import sys
+import jax.numpy as jnp
+from scipy.optimize import Bounds
+import scipy.optimize as scopt
+import matplotlib.pyplot as plt
+from optimparallel import minimize_parallel
+from epi import parameters_const as pm
+
+# SIRDV model class
+class SIRDVW:
+
+    def __init__(self, Nc, params, t_list, DPC_start, DPC_end, data, Pop, 
+                       by_age, codes, vaccines, Delta_t, DO, out_path, out_type='h5'):#added vaccines with respect to SIR
+        # initialize compartments
+        # Y0: Nc x Ns
+        self.Y0 = np.zeros((Nc, Pop.size)).squeeze()
+        # Y: Nc x T x Ns
+        self.Y = np.zeros((Nc, t_list[-1]+1, Pop.size)).squeeze()
+        #initialize parameters
+        self.params = params
+        self.Ns = Pop.size
+        self.Nc = Nc
+
+        self.t_list = t_list
+        self.DPC_start = DPC_start
+        self.DPC_end = DPC_end
+
+        self.data = data
+
+        self.forecast = False
+        
+        self.Pop = Pop
+        self.r_a = np.array([0.33, 1, 1, 1, 1.47, 1.47]) if by_age else 1 #1e-1 * np.array([0.33, 1, 1, 1, 1.47, 1.47]) if by_age else 1 
+        #self.r_a = np.array([0.33, 0.51, 0.78, 1, 1.47, 1.47]) if by_age else 1 
+        self.sigma1 = 0.21#0.15 Merler
+        self.sigma2 = 0.11#0.05 Merler
+        self.theta1 = 0.197#0.10 Merler
+        self.theta2 = 0.036#0.05 MErler
+        self.f = np.array([0.0001, 0.0006, 0.0045, 0.0231, 0.04310, 0.1737]) if by_age else 0.0115 # MOD per 2022-02-26
+        #self.f = np.array([0.00005, 0.0003, 0.00225, 0.01605, 0.02155, 0.1737/2]) if by_age else 0.0115
+        #self.t_rec = np.array([13.44, 14.16, 14.66, 14.4, 14.4, 14.4]) if by_age else 14.20 
+        self.t_rec = 14.20 #* np.ones(6) 
+        self.US1 = np.reshape(vaccines['prima_dose'].to_numpy(), (9, len(t_list) ), order = 'F') 
+        self.US2 = np.reshape(vaccines['seconda_dose'].to_numpy() + vaccines['mono_dose'].to_numpy(), (9, len(t_list) ), order = 'F') 
+        self.UR = np.reshape(vaccines['pregressa_infezione'].to_numpy(), (9, len(t_list) ), order = 'F') 
+        self.period_U = 7
+        self.Delta_t = np.clip(Delta_t * 8 , 0, 1) #probabilità detection
+        self.Sfrac = np.zeros((t_list[-1]+1, Pop.size)).squeeze()
+
+        self.by_age = by_age 
+        self.codes = codes
+        self.ages_opt_fixed = [0,1,2,3] #[0,1,4,5]
+        self.ages_opt = [4,5]#[4,5]
+        self.Ns_opt =2 
+
+        #self.DO = (DO.T / np.sum(DO, axis = 1)).T if by_age else 1
+        self.DO = DO /np.max(np.max(DO))
+        #self.DO = DO if by_age else 1
+        
+        self.minimize_name = 'Infected'
+        self.P = np.zeros((Nc, t_list[-1]+1, Pop.size)).squeeze() #multipliers
+        self.t_contr = int(len(t_list)/self.period_U)
+        self.n_controls = 3 * self.Ns_opt * self.t_contr
+        self.grad_US1_d = np.zeros((6, len(t_list)))
+        self.grad_US2_d = np.zeros((6, len(t_list)))
+        self.grad_UR_d = np.zeros((6, len(t_list)))
+        self.grad_US1 = np.zeros((6, self.t_contr))
+        self.grad_US2 = np.zeros((6, self.t_contr))
+        self.grad_UR = np.zeros((6, self.t_contr))
+        self.I = np.zeros((6, len(t_list)))
+
+        self.consegne = 1e6 * self.Ns_opt/6 * np.ones(len(t_list)+1)  #2e5 * np.ones(len(t_list)+1) #1e6 * np.ones(len(t_list)+1) 
+        self.max_it = 30 
+        self.max_elaps_time = 42
+        self.min_elaps_time = 21
+        # 0 e 5 cap vax 5e4/ consegne 2e5
+        # 2 e 3 cap vax 4e4 / consegne 1e5
+        self.capability_vax = 3e5 * self.Ns_opt/6* np.ones(t_list[-1] +1)#5e4 *np.ones(t_list[-1]+1) #3e5 * np.ones(t_list[-1] +1)
+        
+        self.delay_time = 1
+
+        self.stepsOC = 6#30
+        self.tol = 1e-7
+        self.learning_rate = 2e-4#1e-3
+        self.err_min = 1 + self.tol
+        self.history_oc = list()
+        
+        self.out_type = out_type
+        self.out_path = out_path
+
+        self.initialize_compartments()
+
+    def initialize_compartments(self):
+        initI = self.data[self.data['time']==0].copy() 
+        self.Y0[1] = initI['Infected']
+        #print('Initially infected', self.Y0[1])
+        self.Y0[2] = initI['Recovered']
+        #print('Initially Recovered', self.Y0[2])
+        self.Y0[3] = initI['Deceased']
+        #print('Initially death', self.Y0[4])
+        self.Y0[4] = initI['VaccinatedFirst']
+        self.Y0[5] = initI['VaccinatedSecond']
+        self.Y0[0] = self.Pop - self.Y0[1:].sum(axis=0)
+        print(self.DO)
+        #print('Pop', self.Pop)
+        #print('Susc init', self.Y0[0])
+        #print('US1', np.sum(self.US1[1:7:2,:], axis =0))
+        #print('UR', self.UR)
+        #print('Delta_t', self.Delta_t.shape)
+        nrows = self.Ns
+        ncols = len(self.t_list)
+        ncolreduct = int(ncols / self.period_U)
+        I = np.zeros((ncols, ncolreduct))
+        for i in range(ncolreduct):
+            I[i*self.period_U:(i+1)*self.period_U, i] = 1
+        self.I = I
+        if self.by_age:
+            US1 = np.zeros((6, len(self.t_list)))
+            US1[0] = self.US1[0]
+            US1[1] = np.sum(self.US1[1:3], axis = 0)
+            US1[2] = np.sum(self.US1[3:5], axis = 0)
+            US1[3] = np.sum(self.US1[5:7], axis = 0)
+            US1[4] = self.US1[7]
+            US1[5] = self.US1[8]
+            self.US1 = US1 @ I #controllare il dato finale
+            #self.US1 = np.zeros((6, ncolreduct))
+            US2 = np.zeros((6, len(self.t_list)))
+            US2[0] = self.US2[0]
+            US2[1] = np.sum(self.US2[1:3], axis = 0)
+            US2[2] = np.sum(self.US2[3:5], axis = 0)
+            US2[3] = np.sum(self.US2[5:7], axis = 0)
+            US2[4] = self.US2[7]
+            US2[5] = self.US2[8]
+            self.US2 = US2 @ I
+            #self.US2 = np.zeros((6, ncolreduct))
+            UR = np.zeros((6, len(self.t_list)))
+            UR[0] = self.UR[0]
+            UR[1] = np.sum(self.UR[1:3], axis = 0)
+            UR[2] = np.sum(self.UR[3:5], axis = 0)
+            UR[3] = np.sum(self.UR[5:7], axis = 0)
+            UR[4] = self.UR[7]
+            UR[5] = self.UR[8]
+            self.UR = UR @ I
+            #self.UR = np.zeros((6, ncolreduct))
+        self.data['Infected'] /= self.Delta_t.flatten()
+        #self.US1[self.ages_opt,:] = np.zeros(len(self.t_list))
+        #self.US2[self.ages_opt,:] = np.zeros(len(self.t_list))
+        #self.UR[self.ages_opt,:] = np.zeros(len(self.t_list))
+
+        return
+    
+    def plot_beta(self, t):
+        print(self.params.params)
+        return 
+
+    def fatality_fun(self, t):
+        if t <= 15:
+            return ((self.Y0[0] + self.sigma1 * self.theta1 * self.Y0[4] + self.sigma2 * self.theta2 * self.Y0[5])/ \
+                    (self.Y0[0] + self.sigma1 * self.Y0[4] + self.sigma2 * self.Y0[5]))
+        else:
+            return ((self.Y[0, t-15] + self.sigma1 * self.theta1 * self.Y[4, t-15] + self.sigma2 * self.theta2 * self.Y[5, t-15])/ \
+                    (self.Y[0, t-15] + self.sigma1 * self.Y[4, t-15] + self.sigma2 * self.Y[5, t-15]))
+    
+    def model(self, t, y0, beta, US1, US2, UR):
+        t_int = jnp.floor(t).astype(int) 
+        #beta, gamma = self.params.params_time[t_int]
+        #beta = self.params.params_time[t_int]
+        #print('beta at time', t, beta)
+        S, I, R, D, V, W = y0
+        if self.by_age == 0:
+            US1 = self.US1[t_int]
+            US2 = self.US2[t_int]
+            UR = self.UR[t_int]
+        
+        gamma = 1 / self.t_rec
+        
+       #dSdt = - beta * self.r_a * S * np.dot(self.DO, I / self.Pop) - np.clip(self.US1[:,t_int] * self.Sfrac[t_int],0, S)
+       #dIdt = beta * self.r_a * (S + self.sigma1 * V + self.sigma2 * W) * np.dot(self.DO, I / self.Pop) - gamma * I 
+       #dRdt = gamma * (1 - self.f * self.fatality_fun(t_int)) * I - np.clip(self.UR[:, t_int],0,  R) #the rest of 1st doses is in there
+       #dDdt = gamma * self.f *self.fatality_fun(t_int)* I
+       #dVdt = - beta * self.r_a * self.sigma1 * V * np.dot(self.DO, I / self.Pop) + np.clip(self.US1[:, t_int] * self.Sfrac[t_int],0, S) - np.clip(self.US2[:, t_int],0,V)
+       #dWdt = - beta * self.r_a * self.sigma2 * W * np.dot(self.DO, I / self.Pop) + np.clip(self.US2[:, t_int],0,V) + np.clip(self.UR[:, t_int],0, R)
+       
+        muR = 1/120
+
+        dSdt = - beta * self.r_a * S * jnp.dot(self.DO, I / self.Pop) - jnp.clip(US1 * self.Sfrac[t_int],0, S) + muR*R
+        dIdt = beta * self.r_a * (S + self.sigma1 * V + self.sigma2 * W) * jnp.dot(self.DO, I / self.Pop) - gamma * I 
+        dRdt = gamma * (1 - self.f * self.fatality_fun(t_int)) * I - jnp.clip(UR,0,  R) -muR * R#the rest of 1st doses is in there
+        dDdt = gamma * self.f *self.fatality_fun(t_int)* I
+        dVdt = - beta * self.r_a * self.sigma1 * V * jnp.dot(self.DO, I / self.Pop) + jnp.clip(US1 * self.Sfrac[t_int],0, S) - jnp.clip(US2,0,V)
+        dWdt = - beta * self.r_a * self.sigma2 * W * jnp.dot(self.DO, I / self.Pop) + jnp.clip(US2,0,V) + jnp.clip(UR,0, R)
+        #print('SHAPE', np.vstack((dSdt, dIdt, dRdt, dDdt)).squeeze().shape)
+        return jnp.vstack((dSdt, dIdt, dRdt, dDdt, dVdt, dWdt)).squeeze()
+
+    def model_MCMC(self, params, data):
+        t_list = data.xdata[0].squeeze()
+        self.t_list = t_list.copy()
+        #self.params.params[self.params.getMask()] = params[:-2*self.Ns]
+        #self.params.params[self.params.getMask()] = params[:-3*self.Ns]
+        self.params.params[self.params.getMask()] = params[:-2*self.Ns-1]
+        self.params.forecast(self.params.dataEnd,self.t_list[-1],0,None)
+        
+        Y0 = data.ydata[0].squeeze()
+        if self.by_age:
+            Y0 = np.reshape(Y0, (6,6))
+        self.Y0 = Y0.copy()
+        self.Y0[1] *= params[-2*self.Ns:-self.Ns]
+        self.Y0[2] *= params[-self.Ns:]
+        self.Y0[0] = self.Pop - self.Y0[1:].sum(axis=0)#PEr compartimenti iniziali
+        #self.t_rec = params[-3*self.Ns: -2*self.Ns] #Mettere distribuzione di gamma prima delle IC
+        self.t_rec = params[-2*self.Ns-1: -2*self.Ns] #Mettere distribuzione di gamma prima delle IC
+
+        self.solve()
+        
+        forecast = data.user_defined_object[0][0]
+
+#        if forecast:
+#            T0 = int(self.data.time.iloc[-1])
+#            self.t_list = np.arange(T0, self.t_list[-1]+1) 
+#            self.Y0 = self.Y[...,T0].copy()
+#            self.solve()
+        
+        results = self.Y[:,self.t_list].copy()
+        #if self.by_age:
+        #    np.reshape(results, (6*6, t_list[-1] + 1), 'F')
+        #    results.transpose()
+        return results.transpose()
+    
+    def solve_ham(self, ham_grad, p0):
+        nsteps = int(self.t_list[-1] + 1)
+        #print(p0.shape)
+        self.P[:, nsteps-1] = p0
+        US1 = self.US1[:, -1]/7
+        US2 = self.US1[:, -1 - self.delay_time]/7
+        UR = self.UR[:, -1]/7
+        beta = self.params.params_time[nsteps-1]
+
+        for i in range(nsteps):
+            t = self.t_list[-1] - i
+
+            p0 = self.P[:, t ]
+            US1_old = self.US1[:, int(np.floor((t-1)/self.period_U ))]/self.period_U
+            US2_old = self.US1[:, int(np.floor((t-1)/self.period_U )) - self.delay_time]/self.period_U if t >= self.delay_time else np.zeros(self.Ns) 
+            UR_old = self.UR[:, int(np.floor((t-1)/self.period_U ))]/self.period_U
+            beta_old = self.params.params_time[t-1]
+                
+            k1 = -ham_grad( t, self.Y[:, t ], US1, US2, UR, beta, p0)
+            k2 = -ham_grad( t - 0.5, self.Y[:, t ], US1, US2, UR, beta, p0 - 0.5 * k1)
+            k3 = -ham_grad( t - 0.5, self.Y[:, t ], US1, US2, UR, beta, p0 - 0.5 * k2)
+            k4 = -ham_grad( t - 1, self.Y[:, t -1], US1_old, US2_old, UR_old, beta_old, p0 - k3)
+            
+            self.P[:, t  -1 ] = p0 - (k1 + 2*k2 + 2*k3 + k4)/6
+            
+            US1 = US1_old
+            US2 = US2_old
+            UR = UR_old
+            beta = beta_old
+            
+        return
+
+    def projection_matrix_7(self):
+        weeks = int(self.t_list[-1]/7+1)
+        T = self.t_list[-1]+1
+        # Delivering constraints
+        A = np.zeros((weeks, self.n_controls))
+        for t in range(weeks):
+            for i in range(3*self.Ns_opt):
+                A[:, weeks*i: weeks*(i+1)] = np.eye(weeks)
+        # Max elaps_time -> 6 weeks
+        E1 = np.zeros((weeks*self.Ns_opt, self.n_controls))
+        for t in range(weeks):
+            for i in range(self.Ns_opt):
+                if t >= 6:
+                    E1[t + weeks*i, 3*weeks*i: 3*weeks*i+ t-6] = np.ones(t -6)
+                    E1[t + weeks*i, 3*weeks*i +weeks: 3*weeks*i + weeks +t] = -np.ones(t)
+        # Min elaps_time -> 3 weeks
+        E2 = np.zeros((weeks*self.Ns_opt, self.n_controls))
+        for t in range(weeks):
+            for i in range(self.Ns_opt):
+                if t >= 3:
+                    E2[t + weeks*i, 3*weeks*i: 3*weeks*i+ t-3] = -np.ones(t - 3)
+                    E2[t + weeks*i, 3*weeks*i +weeks: 3*weeks*i + weeks +t] = np.ones(t)
+        #capability
+        C = np.zeros((weeks, self.n_controls))
+        for t in range(weeks):
+            for i in range(3*self.Ns_opt):
+                C[:, weeks*i: weeks*(i+1)] = np.eye(weeks)
+        # Bounds
+#        B = np.eye(n_controls)
+        P = np.concatenate((A, E1, E2, C), axis = 0)
+        #print(P.shape)
+        return P
+    
+    def projection_matrix(self):
+        weeks = int(self.t_list[-1]/7+1)
+        T = self.t_list[-1]+1
+        # Delivering constraints
+        A = np.zeros((weeks, self.n_controls))
+        for j in range(weeks):
+            for i in range(0, 3*self.Ns_opt):
+                A[j, 7*j + T*i: (7*(j+1))+ T*i] = np.ones(7)
+        # Max elaps_time
+        E1 = np.zeros((T*self.Ns_opt, self.n_controls))
+        for t in range(T):
+            for i in range(self.Ns_opt):
+                if t >= self.max_elaps_time:
+                    E1[t + T*i, 3*T*i: 3*T*i+ t-self.max_elaps_time] = np.ones(t - self.max_elaps_time)
+                    E1[t + T*i, 3*T*i +T: 3*T*i + T +t] = -np.ones(t)
+        # Min elaps_time
+        E2 = np.zeros((T*self.Ns_opt, self.n_controls))
+        for t in range(T):
+            for i in range(self.Ns_opt):
+                if t >= self.min_elaps_time:
+                    E2[t + T*i, 3*T*i: 3*T*i+ t-self.min_elaps_time] = -np.ones(t - self.min_elaps_time)
+                    E2[t + T*i, 3*T*i +T: 3*T*i + T +t] = np.ones(t)
+        #capability
+        C = np.zeros((T, self.n_controls))
+        for t in range(T):
+            for i in range(3*self.Ns_opt):
+                C[:, T*i: T*(i+1)] = np.eye(T)
+        # Bounds
+#        B = np.eye(n_controls)
+        P = np.concatenate((A, E1, E2, C), axis = 0)
+        #print(P.shape)
+        return P
+
+    def rhs_7(self):
+        weeks = int(self.t_list[-1]/7+1)
+        T = self.t_list[-1]+1
+        rhs = np.zeros(2* weeks * (self.Ns_opt + 1))
+        
+        rhs[0:weeks] = self.consegne[0:weeks]
+        rhs[weeks + 2*weeks*self.Ns_opt:] = 7*self.capability_vax[0:weeks]
+        #rhs[weeks:weeks+2*T] = np.zeros(2*T)
+        #print(rhs.shape)
+        return rhs
+    
+    def rhs(self):
+        weeks = int(self.t_list[-1]/7 + 1)
+        T = self.t_list[-1]+1
+        rhs = np.zeros(weeks + 2*T*self.Ns_opt + T)
+        
+        rhs[0:weeks] = self.consegne[0:weeks]
+        rhs[weeks + 2*T*self.Ns_opt:] = self.capability_vax
+        #rhs[weeks:weeks+2*T] = np.zeros(2*T)
+        #print(rhs.shape)
+        return rhs
+
+    def lb_proj(self):
+        lb = np.zeros(self.n_controls)
+
+        return lb
+
+    def ub_proj_7(self):
+        ub = np.zeros(self.n_controls)
+        weeks = int(self.t_list[-1]/7+1)
+        
+        for j in range(self.Ns_opt):
+            ub[3*j*weeks:3*j*weeks + weeks] = 7*np.reshape(self.Y[0,:, self.ages_opt[j]], (weeks, 7)).min(axis =1)
+            ub[3*j*weeks + weeks:3*j*weeks + 2*weeks] = 7*np.reshape(self.Y[4,:, self.ages_opt[j]], (weeks, 7)).min(axis = 1)
+            ub[3*j*weeks + 2*weeks:3*j*weeks + 3*weeks] = 7*np.reshape(self.Y[2,:,self.ages_opt[j]], (weeks, 7)).min(axis = 1)
+        
+        return ub
+    
+    def ub_proj(self):
+        T = self.t_list[-1]+1
+        ub = np.zeros(self.n_controls)
+        
+        for j in range(self.Ns_opt):
+            ub[3*j*T:3*j*T + T] = self.Y[0,:, self.ages_opt[j]]
+            ub[3*j*T + T:3*j*T + 2*T] = self.Y[4,:, self.ages_opt[j]]
+            ub[3*j*T + 2*T:3*j*T + 3*T] = self.Y[2,:,self.ages_opt[j]]
+        
+        return ub
+
+    def error_proj(self, x, z):
+        return 1/2 * np.sum((x - z)**2)
+
+    def proj_complete_2(self):
+
+        T = self.t_list[-1]+1
+        #x0 = np.zeros(3*T*self.Ns_opt)
+        z0 = np.concatenate((self.US1[self.ages_opt,:], self.US2[self.ages_opt,:], self.UR[self.ages_opt,:]), axis = 1).flatten()
+        x0 = z0#np.zeros(len(z0))
+        if self.period_U == 7:
+            lower_b = self.lb_proj()
+            upper_b = self.ub_proj_7()
+            rhs = self.rhs_7()
+            P = self.projection_matrix_7()
+        else:    
+            lower_b = self.lb_proj()
+            upper_b = self.ub_proj()
+            rhs = self.rhs()
+            P = self.projection_matrix()
+        #print(x0)
+        #print(rhs)
+        #plt.imshow(P,interpolation='none',cmap='binary')
+        #plt.colorbar()
+        #plt.show()
+        #plt.spy(P)
+        #plt.show()
+        #np.set_printoptions(threshold=sys.maxsize)
+        #print('P')
+        #print(P)
+        #constr = [{'type':'ineq','fun': lambda x: -P@x + rhs}]#, 'jac': lambda x: -P}]
+        constr = scopt.LinearConstraint(P, -np.inf*np.ones(len(rhs)), rhs)
+        bounds = Bounds(lower_b, upper_b)
+        #local mimimization
+        result = scopt.minimize(self.error_proj, x0, args = (z0), bounds = bounds, method = 'trust-constr', constraints=constr,\
+                options={ 'maxiter':70,'verbose':2})
+        print('###########################################')
+        print(result.x)
+        print('###########################################')
+        
+        if self.period_U == 7:
+            for i in range(self.Ns_opt):
+                self.US1[self.ages_opt[i],:] = result.x[i*3*self.t_contr:i*3*self.t_contr+self.t_contr]
+                self.US2[self.ages_opt[i],:] = result.x[i*3*self.t_contr + self.t_contr: i*3*self.t_contr +  2*self.t_contr]
+                self.UR[self.ages_opt[i],:] = result.x[i*3*self.t_contr + 2*self.t_contr: i*3*self.t_contr + 3*self.t_contr]
+        else:
+            for i in range(self.Ns_opt):
+                self.US1[self.ages_opt[i],:] = result.x[i*3*T:i*3*T+T]
+                self.US2[self.ages_opt[i],:] = result.x[i*3*T + T: i*3*T +  2*T]
+                self.UR[self.ages_opt[i],:] = result.x[i*3*T + 2*T: i*3*T + 3*T]
+        return
+
+    def solve(self):
+        t_start = int(self.t_list[0])
+        self.params.compute_param_over_time(int(self.t_list[-1]))
+        self.Y[:,t_start] = self.Y0
+        #self.US2 = np.concatenate((np.zeros((self.Ns, 3)),self.US1[:,:-3]), axis = 1)
+        if self.by_age == 0:
+            self.Sfrac[0] = self.Y0[0] / (self.Y0[0] + (1 - self.Delta_t.values[0]) * self.Y0[2])
+        else:
+            #print('1 - self.delta', (1 - self.Delta_t[0,:]))
+            self.Sfrac[0] = np.clip(self.Y0[0] / (self.Y0[0] + (1 - self.Delta_t[0,:].T) * self.Y0[2]),0,1)
+            #print('Sfrac 0', self.Sfrac[0])
+        for i,t in enumerate(self.t_list[:-1]):
+            y0 = self.Y[:,i+t_start]
+            k = int(np.floor(t/self.period_U ))
+            k_1 = int(np.floor((t+1)/self.period_U))
+            if k >= self.delay_time: 
+                k1=self.model(t      , y0     , self.params.params_time[t], self.US1[:, k]/self.period_U, self.US1[:, k-self.delay_time]/self.period_U, self.UR[:, k]/self.period_U)
+                k2=self.model(t+0.5, y0+0.5*k1, self.params.params_time[t], self.US1[:, k]/self.period_U, self.US1[:, k-self.delay_time]/self.period_U, self.UR[:, k]/self.period_U)
+                k3=self.model(t+0.5, y0+0.5*k2, self.params.params_time[t], self.US1[:, k]/self.period_U, self.US1[:, k - self.delay_time]/self.period_U, self.UR[:, k]/self.period_U)
+                k4=self.model(t+1  , y0+    k3, self.params.params_time[t+1], self.US1[:, k_1]/self.period_U, self.US1[:, k_1 - self.delay_time]/self.period_U, self.UR[:, k_1]/self.period_U) 
+            else:
+                k1=self.model(t      , y0     , self.params.params_time[t], self.US1[:, k]/self.period_U, np.zeros(self.Ns), self.UR[:, k]/self.period_U)
+                k2=self.model(t+0.5, y0+0.5*k1, self.params.params_time[t], self.US1[:, k]/self.period_U, np.zeros(self.Ns), self.UR[:, k]/self.period_U)
+                k3=self.model(t+0.5, y0+0.5*k2, self.params.params_time[t], self.US1[:, k]/self.period_U, np.zeros(self.Ns), self.UR[:, k]/self.period_U)
+                if k_1 == self.delay_time:
+                    k4=self.model(t+1  , y0+    k3, self.params.params_time[t+1], self.US1[:, k_1]/self.period_U, self.US1[:, k_1 - self.delay_time]/self.period_U, self.UR[:, k_1]/self.period_U) 
+                else:
+                    k4=self.model(t+1  , y0+    k3, self.params.params_time[t+1], self.US1[:, k_1]/self.period_U, np.zeros(self.Ns), self.UR[:, k_1]/self.period_U) 
+            self.Y[:,t_start+i+1] = y0 + (k1+2*(k2+k3)+k4)/6.0
+            if self.by_age == 0:
+                self.Sfrac[i+1] = self.Y[0,t_start +  i+1] / (self.Y[0,t_start + i+1] + (1 - self.Delta_t.values[i+1]) * self.Y[2,t_start+ i+1])
+            else:
+                self.Sfrac[i+1] = np.clip(y0[0] / (y0[0] + (1 - self.Delta_t[i+1,:].T) * y0[2]), 0, 1)
+            #print('Sfrac i+1', self.Sfrac[i+1])
+        return
+    
+    def lagrangian(self, t, y, US1, US2, UR):
+        ages_opt = np.array(self.ages_opt)
+        if self.minimize_name == 'Infected':
+            return (y[1,self.ages_opt ]**2).sum() + 1e-5 * (US1[ages_opt]**2 + US2[ages_opt]**2 + UR[ages_opt]**2).sum()
+        elif self.minimize_name == 'Deceased':
+            return (y[3, self.ages_opt]**2).sum() + 1e-5 * (US1[ages_opt]**2 + US2[ages_opt]**2 + UR[ages_opt]**2).sum()
+        elif self.minimize_name == 'Both':
+            return 1e-5*(y[1, self.ages_opt]**2).sum() + (y[3, self.ages_opt]**2).sum()
+        return 
+
+    def hamiltonian(self, t, y, US1, US2, UR, beta, p0):
+        return self.lagrangian(t, y, US1, US2, UR) + jnp.sum(jnp.sum(jnp.dot(p0, self.model(t,y,beta, US1, US2, UR))))
+
+    def lagrangian_2(self, y, US1, UR):
+        ages_opt = np.array(self.ages_opt)
+        if self.minimize_name == 'Infected':
+            return ((y[1,:,self.ages_opt ]**2).sum()).sum() + 1e-5 * ((US1[ages_opt,:]**2 + UR[ages_opt,:]**2).sum()).sum()
+        elif self.minimize_name == 'Deceased':
+            return ((y[3,:, self.ages_opt]**2).sum()).sum() + 1e-5 * ((US1[ages_opt,:]**2 + UR[ages_opt,:]**2).sum()).sum()
+        elif self.minimize_name == 'Both':
+            return 1e-5*(y[1, self.ages_opt]**2).sum() + (y[3, self.ages_opt]**2).sum()
+        return 
+
+    def hamiltonian_2(self, y, US1, UR, p0):
+        sum_model = 0 
+        for t in range(self.t_list[-1]):
+            week = int(t/7)
+            beta = self.params.params_time[t]
+            if t >= self.delay_time:
+                sum_model += jnp.sum(jnp.sum(jnp.dot(p0[:, t, :], self.model(t,y[:, t, :],beta, US1[:,week]/self.period_U, US1[:,week-self.delay_time]/self.period_U , UR[:,week]/self.period_U))))
+            else:
+                sum_model += jnp.sum(jnp.sum(jnp.dot(p0[:, t, :], self.model(t,y[:, t, :],beta, US1[:,week]/self.period_U, np.zeros(self.Ns) , UR[:,week]/self.period_U))))
+        return self.lagrangian_2(y, US1, UR) + sum_model
+
+    def cost_functional_2(self):
+        return self.lagrangian_2(self.Y, self.US1, self.UR)
+    
+    def cost_functional(self):
+        cost_final = 0.0
+        cost_interval = 0.0
+
+        if self.minimize_name == 'Both':
+            cost_final += (self.Y[3,-1]**2).sum()
+        
+        for i in range(self.t_list[-1] + 1):    
+            beta = self.params.params_time[i]
+            k = int(np.floor(i / self.period_U ))
+            if i == 0 or i == self.t_list[-1]:
+                cost_interval += self.lagrangian(i,self.Y[:,i], self.US1[:,k]/self.period_U, self.US2[:,k]/self.period_U, self.UR[:,k]/self.period_U)/2
+            else:
+                cost_interval += self.lagrangian(i,self.Y[:, i], self.US1[:,k]/self.period_U, self.US2[:,k]/self.period_U, self.UR[:,k]/self.period_U)
+        return (cost_interval + cost_final)
+
+    def projection_simplex_sort(self, v, z=1):
+        if ((np.sum(v) - z <= 0) & (np.all(v >= np.zeros(len(v))))):
+            return v
+        #print('v',v.shape)
+        if z <= 0:
+            return np.zeros(v.shape)
+        n_features = v.shape[0]
+        u = np.sort(v)[::-1]
+        cssv = np.cumsum(u) - z
+        ind = np.arange(n_features) + 1
+        #print('ind', ind.shape)
+        #print(u)
+        #print(cssv/ind)
+        #print(ind)
+        cond = (u - cssv / ind) > 0
+        #print('cond', cond)
+        if np.all(cond == False):
+            print(z)
+            print(v)
+            print(cssv)
+        #print('v', v)
+        #print('z',z)
+        rho = ind[cond][-1]
+        theta = cssv[cond][-1] / float(rho)
+        w = np.maximum(v - theta, 0)
+        return w
+    def proj_trial_2(self):
+        self.US1 = np.maximum(np.minimum(self.US1, self.capability_vax[0]), 0)
+        self.UR = np.maximum(np.minimum(self.UR, self.capability_vax[0]), 0)
+        return
+    def proj_trial(self):
+
+        Stot = self.Y[0, :, self.ages_opt] @ self.I
+        Rtot = self.Y[2, :, self.ages_opt] @ self.I
+        Vtot =  self.Y[4, :, self.ages_opt] @ self.I
+        
+        self.US1[self.ages_opt, :] = np.maximum(np.minimum(self.US1[self.ages_opt, :], Stot),0)
+        self.UR[self.ages_opt, :]  = np.maximum(np.minimum(self.UR[self.ages_opt, :], Rtot),0)
+        self.US2[self.ages_opt, :] = np.maximum(np.minimum(self.US2[self.ages_opt, :], Vtot),0)
+        
+        for k in range(1):
+            for j in range(self.t_contr):
+                if j > 2:
+                    vec = np.concatenate((self.US1[self.ages_opt, j].flatten(), self.UR[self.ages_opt, j].flatten(), self.US2[self.ages_opt, j].flatten()))
+                    if np.sum(vec) >= self.consegne[j]:
+                        vec = self.projection_simplex_sort(vec, self.consegne[j])
+                        #self.US1[self.ages_opt,j] = np.maximum(vec[:self.Ns_opt], 0)
+                        #self.UR[self.ages_opt,j] = np.maximum(vec[self.Ns_opt:2*self.Ns_opt], 0)
+                        #self.US2[self.ages_opt,j] = np.maximum(vec[2*self.Ns_opt:3*self.Ns_opt], 0)
+                        self.US1[self.ages_opt,j] = np.maximum(np.minimum(vec[:self.Ns_opt], Stot[:,j]), 0)
+                        self.UR[self.ages_opt,j] = np.maximum(np.minimum(vec[self.Ns_opt:2*self.Ns_opt], Rtot[:,j]), 0)
+                        if j >6:
+                            self.US2[self.ages_opt,j] = np.maximum(np.maximum(np.minimum(np.minimum(vec[2*self.Ns_opt:3*self.Ns_opt], Vtot[:,j]), np.sum(self.US1[self.ages_opt,:j-2], axis = 1) - np.sum(self.US2[self.ages_opt,:j-1], axis = 1)) , 0), np.sum(self.US1[self.ages_opt, j-6:], axis = 1) - np.sum(self.US2[self.ages_opt,:j-1], axis = 1)) #ultimo self.US2[self.ages_opt, j-6:j-2]
+                        else:
+                            self.US2[self.ages_opt,j] = np.maximum(np.minimum(np.minimum(vec[2*self.Ns_opt:3*self.Ns_opt], Vtot[:,j]), self.US1[self.ages_opt,j-2]), 0)
+                    else:
+                        if j >6:
+                            self.US2[self.ages_opt,j] = np.maximum(np.maximum(np.minimum(np.minimum(self.US2[self.ages_opt,j], Vtot[:,j]), np.sum(self.US1[self.ages_opt,:j-2], axis = 1) - np.sum(self.US2[self.ages_opt,:j-1], axis = 1)) , 0), np.sum(self.US1[self.ages_opt, j-6:j-2], axis = 1) - np.sum(self.US2[self.ages_opt,:j-1], axis = 1))
+                        #pass
+                    #self.US1[self.ages_opt,j] = np.maximum(np.minimum(vec[:self.Ns_opt], Stot[:,j]), 0)
+                    #self.UR[self.ages_opt,j] = np.maximum(np.minimum(vec[self.Ns_opt:2*self.Ns_opt], Vtot[:,j]), 0)
+                    #self.US2[self.ages_opt,j] = np.maximum(np.minimum(vec[2*self.Ns_opt:3*self.Ns_opt], Rtot[:,j]), 0)
+                else:
+                    self.US2[self.ages_opt,j] = np.zeros(self.Ns_opt)
+                    vec = np.concatenate((self.US1[self.ages_opt, j].flatten(), self.UR[self.ages_opt, j].flatten()))
+                    #print(vec)
+                    if np.sum(vec) >= self.consegne[j]:
+                        vec = self.projection_simplex_sort(vec, self.consegne[j])
+                        #self.US1[self.ages_opt,j] = np.maximum(vec[:self.Ns_opt], 0)
+                        #self.UR[self.ages_opt,j] = np.maximum(vec[self.Ns_opt:], 0)
+                        self.US1[self.ages_opt,j] = np.maximum(np.minimum(vec[:self.Ns_opt], Stot[:,j]), 0)
+                        self.UR[self.ages_opt,j] = np.maximum(np.minimum(vec[self.Ns_opt:2*self.Ns_opt], Rtot[:,j]), 0)
+                    else:
+                        pass
+           #for j in range(self.t_contr):
+           #    if ((j >= 6) and (np.any(np.sum(self.US1[self.ages_opt, :j -6],axis =1) - np.sum(self.US2[self.ages_opt, :j+1],axis=1) > np.zeros(self.Ns_opt)))):
+           #        for i,age in enumerate(self.ages_opt):
+           #            if (np.sum(self.US1[age, :j - 6]) - np.sum(self.US2[age,:j+1]) > 0):
+           #                vec2 = self.US1[age,:j - 6]
+           #                vec2 = self.projection_simplex_sort(vec2, np.sum(self.US2[age,:j +1]))
+           #                self.US1[age, :j - 6] = np.minimum(np.maximum(np.minimum(vec2, self.capability_vax[:j - 6]) ,0), Stot[i, :j-6])
+           #for j in range(self.t_contr):
+           #    if ((j >= 3) and (np.any(np.sum(self.US1[self.ages_opt, :j -3],axis =1) - np.sum(self.US2[self.ages_opt, :j+1],axis =1) < np.zeros(self.Ns_opt)))):
+           #        for i,age in enumerate(self.ages_opt):
+           #            if (np.sum(self.US1[age, :j - 3]) - np.sum(self.US2[age,:j+1]) < 0):
+           #                vec2 = self.US2[age, :j +1]
+           #                vec2 = self.projection_simplex_sort(vec2, np.sum(self.US1[age,:j-3 +1]))
+           #                #self.US2[age, :j +1] = np.minimum(np.maximum(np.minimum(vec2, self.capability_vax[:j+1]),0), Vtot[i, :j+1])
+           #                self.US2[age, :j +1] = np.maximum(np.minimum(vec2, self.capability_vax[:j+1]),0)
+        return
+
+
+    def proj_complete_7(self):
+        
+        #print(self.Y[0, :, self.ages_opt].shape)
+        #print(self.I.shape)
+
+        Stot = self.Y[0, :, self.ages_opt] @ self.I
+        Rtot = self.Y[2, :, self.ages_opt] @ self.I
+        Vtot =  self.Y[4, :, self.ages_opt] @ self.I
+        
+        self.US1[self.ages_opt, :] = np.maximum(self.US1[self.ages_opt, :],0)
+        self.UR[self.ages_opt, :]  = np.maximum(self.UR[self.ages_opt, :],0)
+        self.US2[self.ages_opt, :] = np.maximum(self.US2[self.ages_opt, :],0)
+        #self.US1[self.ages_opt, :] = np.maximum(np.minimum(self.US1[self.ages_opt, :], Stot),0)
+        #self.UR[self.ages_opt, :]  = np.maximum(np.minimum(self.UR[self.ages_opt, :], Rtot),0)
+        #self.US2[self.ages_opt, :] = np.maximum(np.minimum(self.US2[self.ages_opt, :], Vtot),0)
+
+        # PREPROCESSING STEP
+        for j in range(self.t_contr):
+            if j > 2:
+                vec = np.concatenate((self.US1[self.ages_opt, j].flatten(), self.UR[self.ages_opt, j].flatten(), self.US2[self.ages_opt, j].flatten()))
+                if np.sum(vec) >= self.consegne[j]:
+                    vec = self.projection_simplex_sort(vec, self.consegne[j])
+                    self.US1[self.ages_opt,j] = np.maximum(vec[:self.Ns_opt], 0)
+                    self.UR[self.ages_opt,j] = np.maximum(vec[self.Ns_opt:2*self.Ns_opt], 0)
+                    self.US2[self.ages_opt,j] = np.maximum(vec[2*self.Ns_opt:3*self.Ns_opt], 0)
+                else:
+                    pass
+                #self.US1[self.ages_opt,j] = np.maximum(np.minimum(vec[:self.Ns_opt], Stot[:,j]), 0)
+                #self.UR[self.ages_opt,j] = np.maximum(np.minimum(vec[self.Ns_opt:2*self.Ns_opt], Vtot[:,j]), 0)
+                #self.US2[self.ages_opt,j] = np.maximum(np.minimum(vec[2*self.Ns_opt:3*self.Ns_opt], Rtot[:,j]), 0)
+            else:
+                self.US2[self.ages_opt,j] = np.zeros(self.Ns_opt)
+                vec = np.concatenate((self.US1[self.ages_opt, j].flatten(), self.UR[self.ages_opt, j].flatten()))
+                #print(vec)
+                if np.sum(vec) >= self.consegne[j]:
+                    vec = self.projection_simplex_sort(vec, self.consegne[j])
+                    self.US1[self.ages_opt,j] = np.maximum(vec[:self.Ns_opt], 0)
+                    self.UR[self.ages_opt,j] = np.maximum(vec[self.Ns_opt:], 0)
+                else:
+                    pass
+                #self.US1[self.ages_opt,j] = np.maximum(np.minimum(vec[:self.Ns_opt], Stot[:,j]), 0)
+                #self.UR[self.ages_opt,j] = np.maximum(np.minimum(vec[self.Ns_opt:], Rtot[:,j]), 0)
+        
+        for k in range(0,self.max_it):
+            #STEP 1
+            for j in range(self.t_contr):
+                if ((j >= 6) and (np.any(np.sum(self.US1[self.ages_opt, :j -6],axis =1) - np.sum(self.US2[self.ages_opt, :j+1],axis=1) > np.zeros(self.Ns_opt)))):
+                    for i,age in enumerate(self.ages_opt):
+                        if (np.sum(self.US1[age, :j - 6]) - np.sum(self.US2[age,:j+1]) > 0):
+                            vec2 = self.US1[age,:j - 6]
+                            vec2 = self.projection_simplex_sort(vec2, np.sum(self.US2[age,:j +1]))
+                            #self.US1[age, :j - 6] = np.minimum(np.maximum(np.minimum(vec2, self.capability_vax[:j - 6]) ,0), Stot[i, :j-6])
+                            self.US1[age, :j - 6] = np.maximum(np.minimum(vec2, self.capability_vax[:j - 6]) ,0)
+            
+            #STEP 3
+            for j in range(self.t_contr):
+                if ((j >= 3) and (np.any(np.sum(self.US1[self.ages_opt, :j -3],axis =1) - np.sum(self.US2[self.ages_opt, :j+1],axis =1) < np.zeros(self.Ns_opt)))):
+                    for i,age in enumerate(self.ages_opt):
+                        if (np.sum(self.US1[age, :j - 3]) - np.sum(self.US2[age,:j+1]) < 0):
+                            vec2 = self.US2[age, :j +1]
+                            vec2 = self.projection_simplex_sort(vec2, np.sum(self.US1[age,:j-3 +1]))
+                            #self.US2[age, :j +1] = np.minimum(np.maximum(np.minimum(vec2, self.capability_vax[:j+1]),0), Vtot[i, :j+1])
+                            self.US2[age, :j +1] = np.maximum(np.minimum(vec2, self.capability_vax[:j+1]),0)
+            
+            #STEP 4                        
+            for j in range(self.t_contr):
+                if j > 2:
+                    vec = np.concatenate((self.US1[self.ages_opt, j].flatten(), self.UR[self.ages_opt, j].flatten(), self.US2[self.ages_opt, j].flatten()))
+                    if np.sum(vec)>= self.consegne[j]:
+                        vec = self.projection_simplex_sort(vec, self.consegne[j])
+                        self.US1[self.ages_opt,j] = np.maximum(vec[:self.Ns_opt], 0)
+                        self.UR[self.ages_opt,j] = np.maximum(vec[self.Ns_opt:2*self.Ns_opt], 0)
+                        self.US2[self.ages_opt,j] = np.maximum(vec[2*self.Ns_opt:3*self.Ns_opt], 0)
+                    else:
+                        pass
+                    #self.US1[self.ages_opt,j] = np.maximum(np.minimum(vec[:self.Ns_opt], Stot[:,j]), 0)
+                    #self.UR[self.ages_opt,j] = np.maximum(np.minimum(vec[self.Ns_opt:2*self.Ns_opt], Vtot[:,j]), 0)
+                    #self.US2[self.ages_opt,j] = np.maximum(np.minimum(vec[2*self.Ns_opt:3*self.Ns_opt], Rtot[:,j]), 0)
+                else:
+                    self.US2[self.ages_opt,j] = np.zeros(self.Ns_opt)
+                    vec = np.concatenate((self.US1[self.ages_opt, j].flatten(), self.UR[self.ages_opt, j].flatten()))
+                    if np.sum(vec) >= self.consegne[j]:
+                        vec = self.projection_simplex_sort(vec, self.consegne[j])
+                        self.US1[self.ages_opt,j] = np.maximum(vec[:self.Ns_opt], 0)
+                        self.UR[self.ages_opt,j] = np.maximum(vec[self.Ns_opt:], 0)
+                    else:
+                        pass
+                    #self.US1[self.ages_opt,j] = np.maximum(np.minimum(vec[:self.Ns_opt], Stot[:,j]), 0)
+                    #self.UR[self.ages_opt,j] = np.maximum(np.minimum(vec[self.Ns_opt:], Rtot[:,j]), 0)
+        
+        return
+    
+    def proj_complete(self):
+        
+        self.US1 = np.maximum(np.minimum(self.US1, self.Y[0, :].T),0)
+        self.UR = np.maximum(np.minimum(self.UR, self.Y[2, :].T),0)
+        self.US2 = np.maximum(np.minimum(self.US2, self.Y[4, :].T),0)
+
+        # PREPROCESSING STEP
+        for j in range(int((self.t_list[-1] )/7 )):
+            if j > 2:
+                vec = np.concatenate((self.US1[self.ages_opt, 7*j : 7*(j+1)].flatten('C'), self.UR[self.ages_opt, 7*j : 7*(j+1)].flatten('C'), self.US2[self.ages_opt, 7*j:7*(j+1)].flatten('C')))
+                vec = self.projection_simplex_sort(vec, self.consegne[int(j/7)])
+                for i in range(7*j, 7*(j+1)):
+                    self.US1[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j) : self.Ns_opt * (i - 7*j +1)], self.Y[0, i-1,self.ages_opt]),0)
+                    self.UR[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j + 7) : self.Ns_opt * (i - 7*j + 7 +1)], self.Y[2, i-1,self.ages_opt]),0)
+                    self.US2[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j + 14) : self.Ns_opt * (i - 7*j + 14 +1)], self.Y[4, i-1,self.ages_opt]),0)
+            else:
+                self.US2[self.ages_opt,7*j:7*(j+1)] = np.zeros((self.Ns_opt, 7))
+                vec = np.concatenate((self.US1[self.ages_opt, 7*j : 7*(j+1)].flatten('C'), self.UR[self.ages_opt, 7*j : 7*(j+1)].flatten('C')))
+                vec = self.projection_simplex_sort(vec, self.consegne[int(j/7)])
+                for i in range(7*j, 7*(j+1)):
+                    #print(i)
+                    if (i>0):
+                        self.US1[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j) : self.Ns_opt * (i - 7*j +1)], self.Y[0, i-1,self.ages_opt]),0)
+                        self.UR[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j + 7) : self.Ns_opt * (i - 7*j + 7 +1)], self.Y[2, i-1,self.ages_opt]),0)
+                    else:
+                        self.US1[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j) : self.Ns_opt * (i - 7*j +1)], self.Y[0, i,self.ages_opt]),0)
+                        self.UR[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j + 7) : self.Ns_opt * (i - 7*j + 7 +1)], self.Y[2, i,self.ages_opt]),0)
+
+        for k in range(0,self.max_it):
+            #STEP 1
+            for j in range(self.t_list[-1] + 1):
+                if ((j >= self.max_elaps_time) and (np.any(np.sum(self.US1[:, :j -self.max_elaps_time +1], axis = 1) - np.sum(self.US2[:, :j+1], axis =1) > np.zeros(self.Ns)))):
+                    
+                   #for age in range(self.Ns):
+                   #    if (np.sum(self.US1[age, :j - self.max_elaps_time +1]) - np.sum(self.US2[age,:j+1]) > 0):
+                   #        vec2 = self.US2[age,:j+1]
+                   #        #print('Here',  np.sum(self.US1[age,:j-self.max_elaps_time +1]))
+                   #        vec2 = self.projection_simplex_sort(vec2, np.sum(self.US1[age,:j-self.max_elaps_time +1]))
+                   #        self.US2[age, :j+1] = np.minimum(vec2, self.capability_vax[:j+1])
+                   #        for s in range(j +1):
+                   #            vec4 = np.array([self.US1[age,s], self.UR[age,s]])
+                   #        #    if (self.capability_vax[s] - self.US2[age,s] <= 0):
+                   #        #        vec4 = np.zeros(len(vec4))
+                   #        #    else:
+                   #        #        vec4 = self.projection_simplex_sort(vec4, max(self.capability_vax[s] - self.US2[age,s], 0))
+                   #            if s == 0:
+                   #                self.US1[age,s] = max(min(vec4[0], self.Y[0,s,age]), 0)
+                   #                self.UR[age,s] = max(min(vec4[1], self.Y[4,s,age]),0)
+                   #            else:
+                   #                self.US1[age,s] = max(min(vec4[0], self.Y[0,s-1,age]), 0)
+                   #                self.UR[age,s] = max(min(vec4[1], self.Y[4,s-1,age]),0)
+                    
+                    for age in range(self.Ns):
+                        if (age not in self.ages_opt_fixed) and (np.sum(self.US1[age, :j - self.max_elaps_time +1]) - np.sum(self.US2[age,:j+1]) > 0):
+                            vec2 = self.US1[age,:j - self.max_elaps_time +1]
+                            #print('Here',  np.sum(self.US1[age,:j-self.max_elaps_time +1]))
+                            vec2 = self.projection_simplex_sort(vec2, np.sum(self.US2[age,:j +1]))
+                            self.US1[age, :j - self.max_elaps_time +1] = np.minimum(np.maximum(np.minimum(vec2, self.capability_vax[:j - self.max_elaps_time +1]),0), self.Y[0,:j-self.max_elaps_time+1,age])
+                         #   for s in range(j - self +1):
+                         #       vec4 = np.array([self.US2[age,s], self.UR[age,s]])
+                            #    if (self.capability_vax[s] - self.US2[age,s] <= 0):
+                            #        vec4 = np.zeros(len(vec4))
+                            #    else:
+                            #        vec4 = self.projection_simplex_sort(vec4, max(self.capability_vax[s] - self.US2[age,s], 0))
+                         #       if s == 0:
+                         #           self.US1[age,s] = max(min(vec4[0], self.Y[0,s,age]), 0)
+                         #           self.UR[age,s] = max(min(vec4[1], self.Y[4,s,age]),0)
+                         #       else:
+                         #           self.US1[age,s] = max(min(vec4[0], self.Y[0,s-1,age]), 0)
+                         #           self.UR[age,s] = max(min(vec4[1], self.Y[4,s-1,age]),0)
+        #   #STEP 2                        
+        #   for j in range(int((self.t_list[-1] )/7 )):
+        #       if j > 2:
+        #           vec = np.concatenate((self.US1[:, 7*j : 7*(j+1)].flatten('C'), self.UR[:, 7*j : 7*(j+1)].flatten('C'), self.US2[:, 7*j:7*(j+1)].flatten('C')))
+        #           vec = self.projection_simplex_sort(vec, self.consegne[j])
+        #           for i in range(7*j, 7*(j+1)):
+        #               self.US1[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j) : self.Ns * (i - 7*j +1)], self.Y[0, i-1]),0)
+        #               self.UR[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j + 7) : self.Ns * (i - 7*j + 7 +1)], self.Y[2, i-1]),0)
+        #               self.US2[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j + 14) : self.Ns * (i - 7*j + 14 +1)], self.Y[4, i-1]),0)
+        #       else:
+        #           self.US2[:,7*j:7*(j+1)] = np.zeros((self.Ns, 7))
+        #           vec = np.concatenate((self.US1[:, 7*j : 7*(j+1)].flatten('C'), self.UR[:, 7*j : 7*(j+1)].flatten('C')))
+        #           #print(vec)
+        #           #print(self.consegne[j])
+        #           vec = self.projection_simplex_sort(vec, self.consegne[int(j/7)])
+        #           for i in range(7*j, 7*(j+1)):
+        #               if (i>0):
+        #                   self.US1[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j) : self.Ns * (i - 7*j +1)], self.Y[0, i-1]),0)
+        #                   self.UR[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j + 7) : self.Ns * (i - 7*j + 7 +1)], self.Y[2, i-1]),0)
+        #               else:
+        #                   self.US1[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j) : self.Ns * (i - 7*j +1)], self.Y[0, i]),0)
+        #                   self.UR[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j + 7) : self.Ns * (i - 7*j + 7 +1)], self.Y[2, i]),0)
+            
+            #STEP 3
+            for j in range(self.t_list[-1] + 1):
+                if ((j >= self.min_elaps_time) and (np.any(np.sum(self.US1[:, :j -self.min_elaps_time +1], axis = 1) - np.sum(self.US2[:, :j+1], axis =1) < np.zeros(self.Ns)))):
+                    
+                   #for age in range(self.Ns):
+                   #    if (np.sum(self.US1[age, :j - self.min_elaps_time +1]) - np.sum(self.US2[age,:j+1]) < 0):
+                   #        #print('ci sono')
+                   #        vec2 = self.US1[age, :j - self.min_elaps_time +1]
+                   #        vec2 = self.projection_simplex_sort(vec2, np.sum(self.US2[age,:j +1]))
+                   #        self.US1[age, :j - self.min_elaps_time +1] = np.minimum(vec2, self.capability_vax[:j-self.min_elaps_time+1])
+                   #        for s in range(j -self.min_elaps_time+1):
+                   #            vec4 = np.array([self.US2[age,s], self.UR[age,s]])
+                   #        #    if (self.capability_vax[s] - self.US1[age,s] <= 0):
+                   #        #        vec4 = np.zeros(len(vec4))
+                   #        #    else:
+                   #        #        vec4 = self.projection_simplex_sort(vec4, max(self.capability_vax[s] - self.US1[age, s], 0))
+                   #            if s == 0:
+                   #                self.US2[age,s] = max(min(vec4[0], self.Y[5,s,age]), 0)
+                   #                self.UR[age,s] = max(min(vec4[1], self.Y[4,s,age]),0)
+                   #            else:
+                   #                self.US2[age,s] = max(min(vec4[0], self.Y[5,s-1,age]), 0)
+                   #                self.UR[age,s] = max(min(vec4[1], self.Y[4,s-1,age]),0)
+                    for age in range(self.Ns):
+                        if (age not in self.ages_opt_fixed) and(np.sum(self.US1[age, :j - self.min_elaps_time +1]) - np.sum(self.US2[age,:j+1]) < 0):
+                            #print('ci sono')
+                            vec2 = self.US2[age, :j +1]
+                            #print(vec2)
+                            #print(np.sum(self.US1[age,:j-self.min_elaps_time+1]))
+                            vec2 = self.projection_simplex_sort(vec2, np.sum(self.US1[age,:j-self.min_elaps_time +1]))
+                            self.US2[age, :j +1] = np.minimum(np.maximum(np.minimum(vec2, self.capability_vax[:j+1]),0), self.Y[4, :j+1,age])
+                          #  for s in range(j -self.min_elaps_time+1):
+                          #      vec4 = np.array([self.US2[age,s], self.UR[age,s]])
+                            #    if (self.capability_vax[s] - self.US1[age,s] <= 0):
+                            #        vec4 = np.zeros(len(vec4))
+                            #    else:
+                            #        vec4 = self.projection_simplex_sort(vec4, max(self.capability_vax[s] - self.US1[age, s], 0))
+                          #      if s == 0:
+                          #          self.US2[age,s] = max(min(vec4[0], self.Y[5,s,age]), 0)
+                          #          self.UR[age,s] = max(min(vec4[1], self.Y[4,s,age]),0)
+                          #      else:
+                          #          self.US2[age,s] = max(min(vec4[0], self.Y[5,s-1,age]), 0)
+                          #          self.UR[age,s] = max(min(vec4[1], self.Y[4,s-1,age]),0)
+                            
+                          # vec2 = self.US2[age, :j+1]
+                          # vec2 = self.projection_simplex_sort(vec2, np.sum(self.US1[age,:j-self.min_elaps_time +1]))
+                          # self.US2[age, :j+1] = np.minimum(vec2, self.capability_vax[:j+1])
+                          # for s in range(j +1):
+                          #     vec4 = np.array([self.US1[age,s], self.UR[age,s]])
+                          #     if (self.capability_vax[s] - self.US2[age,s] <= 0):
+                          #         vec4 = np.zeros(len(vec4))
+                          #     else:
+                          #         vec4 = self.projection_simplex_sort(vec4, max(self.capability_vax[s] - self.US2[age, s], 0))
+                          #     if s == 0:
+                          #         self.US1[age,s] = max(min(vec4[0], self.Y[0,s,age]), 0)
+                          #         self.UR[age,s] = max(min(vec4[1], self.Y[4,s,age]),0)
+                          #     else:
+                          #         self.US1[age,s] = max(min(vec4[0], self.Y[0,s-1,age]), 0)
+                          #         self.UR[age,s] = max(min(vec4[1], self.Y[4,s-1,age]),0)
+            
+            #STEP 4                        
+            for j in range(int((self.t_list[-1] )/7 )):
+                if j > 2:
+                    vec = np.concatenate((self.US1[self.ages_opt, 7*j : 7*(j+1)].flatten('C'), self.UR[self.ages_opt, 7*j : 7*(j+1)].flatten('C'), self.US2[self.ages_opt, 7*j:7*(j+1)].flatten('C')))
+                    vec = self.projection_simplex_sort(vec, self.consegne[int(j/7)])
+                    for i in range(7*j, 7*(j+1)):
+                        self.US1[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j) : self.Ns_opt * (i - 7*j +1)], self.Y[0, i-1,self.ages_opt]),0)
+                        self.UR[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j + 7) : self.Ns_opt * (i - 7*j + 7 +1)], self.Y[2, i-1,self.ages_opt]),0)
+                        self.US2[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j + 14) : self.Ns_opt * (i - 7*j + 14 +1)], self.Y[4, i-1,self.ages_opt]),0)
+                else:
+                    self.US2[self.ages_opt,7*j:7*(j+1)] = np.zeros((self.Ns_opt, 7))
+                    vec = np.concatenate((self.US1[self.ages_opt, 7*j : 7*(j+1)].flatten('C'), self.UR[self.ages_opt, 7*j : 7*(j+1)].flatten('C')))
+                    vec = self.projection_simplex_sort(vec, self.consegne[int(j/7)])
+                    for i in range(7*j, 7*(j+1)):
+                        #print(i)
+                        if (i>0):
+                            self.US1[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j) : self.Ns_opt * (i - 7*j +1)], self.Y[0, i-1,self.ages_opt]),0)
+                            self.UR[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j + 7) : self.Ns_opt * (i - 7*j + 7 +1)], self.Y[2, i-1,self.ages_opt]),0)
+                        else:
+                            self.US1[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j) : self.Ns_opt * (i - 7*j +1)], self.Y[0, i,self.ages_opt]),0)
+                            self.UR[self.ages_opt,i] = jnp.maximum(jnp.minimum(vec[self.Ns_opt * (i - 7*j + 7) : self.Ns_opt * (i - 7*j + 7 +1)], self.Y[2, i,self.ages_opt]),0)
+           #for j in range(int((self.t_list[-1] )/7 )):
+           #    if j > 2:
+           #        vec = np.concatenate((self.US1[:, 7*j : 7*(j+1)].flatten('C'), self.UR[:, 7*j : 7*(j+1)].flatten('C'), self.US2[:, 7*j:7*(j+1)].flatten('C')))
+           #        vec = self.projection_simplex_sort(vec, self.consegne[j])
+           #        for i in range(7*j, 7*(j+1)):
+           #            self.US1[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j) : self.Ns * (i - 7*j +1)], self.Y[0, i-1]),0)
+           #            self.UR[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j + 7) : self.Ns * (i - 7*j + 7 +1)], self.Y[2, i-1]),0)
+           #            self.US2[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j + 14) : self.Ns * (i - 7*j + 14 +1)], self.Y[4, i-1]),0)
+           #    else:
+           #        self.US2[:,7*j:7*(j+1)] = np.zeros((self.Ns, 7))
+           #        vec = np.concatenate((self.US1[:, 7*j : 7*(j+1)].flatten('C'), self.UR[:, 7*j : 7*(j+1)].flatten('C')))
+           #        vec = self.projection_simplex_sort(vec, self.consegne[int(j/7)])
+           #        for i in range(7*j, 7*(j+1)):
+           #            if (i>0):
+           #                self.US1[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j) : self.Ns * (i - 7*j +1)], self.Y[0, i-1]),0)
+           #                self.UR[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j + 7) : self.Ns * (i - 7*j + 7 +1)], self.Y[2, i-1]),0)
+           #            else:
+           #                self.US1[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j) : self.Ns * (i - 7*j +1)], self.Y[0, i]),0)
+           #                self.UR[:,i] = jnp.maximum(jnp.minimum(vec[self.Ns * (i - 7*j + 7) : self.Ns * (i - 7*j + 7 +1)], self.Y[2, i]),0)
+        
+        return
+
+
+    def optimal_control(self):
+        
+        init_US1 = self.US1
+        init_US2 = self.US2
+        init_UR = self.UR
+
+        z0 = np.concatenate((self.US1[self.ages_opt,:], self.US2[self.ages_opt,:], self.UR[self.ages_opt,:]), axis = 1).flatten()
+        if self.period_U == 7:
+            lower_b = self.lb_proj()
+            upper_b = self.ub_proj_7()
+            rhs = self.rhs_7()
+            P = self.projection_matrix_7()
+            
+            plt.spy(P)
+            plt.show()
+            plt.imshow(np.repeat(np.reshape(P@z0 - rhs, (len(rhs),1)),100, axis = 1), interpolation='none', cmap='rainbow')
+            plt.colorbar()
+            plt.show()
+        grad_x = jax.grad(self.hamiltonian,1)
+        #plt.imshow(P,interpolation='none',cmap='binary')
+        #plt.colorbar()
+        grad_US1 = jax.grad(self.hamiltonian_2, 1)
+        grad_UR = jax.grad(self.hamiltonian_2, 2)
+
+        grad_x_jit = grad_x #jax.jit(grad_x)
+        grad_US1_jit = grad_US1 #jax.jit(grad_US1)
+        grad_UR_jit = grad_UR #jax.jit(grad_UR)
+
+        sum_gradient = 0.0
+        sum_old = 1.0
+        ep = 1
+
+        print('Gradient Loop...')
+        print('--------------------------------------------------------------')
+
+        self.solve()
+        for age in self.ages_opt:
+            plt.plot(self.Y[0, :, age])
+        plt.legend(self.ages_opt)
+        plt.show() 
+
+        while (ep <= self.stepsOC and self.err_min > self.tol):
+            p0 = np.zeros((self.Nc, self.Ns))
+            sum_gradient = 0.0
+
+            if self.minimize_name == 'Both':
+                p0[3,:] = 2* self.Y[3,-1,:] 
+            
+            self.P[:,-1,:] = p0
+            
+            # Solution of the state problem 
+            self.proj_trial_2()
+            self.solve()
+
+            # Solution of the adjoint problem
+            self.solve_ham(grad_x_jit, p0)
+            if ep == 0:  
+                for i,age in enumerate(self.ages_opt):
+                    plt.plot(self.P[0,:,age])
+                plt.legend(self.ages_opt)
+                plt.show()
+
+                for i,age in enumerate(self.ages_opt):
+                    plt.plot(self.P[1,:,age])
+                plt.legend(self.ages_opt)
+                plt.show()
+
+                for i,age in enumerate(self.ages_opt):
+                    plt.plot(self.P[2,:,age])
+                plt.legend(self.ages_opt)
+                plt.show()
+
+                for i,age in enumerate(self.ages_opt):
+                    plt.plot(self.P[3,:,age])
+                plt.legend(self.ages_opt)
+                plt.show()
+
+                for i,age in enumerate(self.ages_opt):
+                    plt.plot(self.P[4,:,age])
+                plt.legend(self.ages_opt)
+                plt.show()
+
+                for i,age in enumerate(self.ages_opt):
+                    plt.plot(self.P[5,:,age])
+                plt.legend(self.ages_opt)
+                plt.show()
+
+            US1_old = self.US1
+            UR_old = self.UR             
+            
+            self.grad_US1 = grad_US1( self.Y, self.US1, self.UR, self.P)
+            self.grad_UR  = grad_UR(self.Y, self.US1, self.UR, self.P)
+            
+
+            #PROJECTION
+            #self.proj_complete_2()
+            self.proj_trial_2()
+
+            #print('Grad every', self.period_U, 'days')
+            #print(self.grad_US1_d)
+            #print(self.grad_US1)
+            #print(self.grad_UR)
+            for ages in self.ages_opt_fixed:
+                self.grad_US1 = self.grad_US1.at[ages,:].set(np.zeros(self.t_contr))
+                self.grad_UR = self.grad_UR.at[ages,:].set(np.zeros(self.t_contr))
+                #self.grad_US1[ages,:] = np.zeros(self.t_contr)
+                #self.grad_US2[ages,:] = np.zeros(self.t_contr)
+                #self.grad_UR[ages,:] = np.zeros(self.t_contr)
+            #print('US1')
+            #print(self.US1)
+            #print(self.grad_US1)
+            #print('US2')
+            #print(self.US2)
+            #print(self.grad_US2)
+            #print('UR')
+            #print(self.UR)
+            #print(self.grad_UR)
+            b = 0.5# 0.1
+            J_old = self.cost_functional_2()
+            cost = list()
+            #if ep == 1:
+            #    t = np.linspace(0, 1e-5, 100)
+            #    for ti in t:
+            #        self.US1 = US1_old - ti * self.grad_US1
+            #        self.US2 = US2_old - ti* self.grad_US2
+            #       self.UR = UR_old - ti * self.grad_UR
+            #       self.solve()
+            #       cost.append(self.cost_functional())
+            #   plt.plot(t, cost)
+            #   plt.show()
+                
+
+            self.US1 = US1_old - self.grad_US1
+            #self.US2 = US2_old - self.grad_US2#np.concatenate((np.zeros((self.Ns, 3)), self.US1[:,:-3]), axis = 1)#US2_old - self.grad_US2
+            self.UR = UR_old - self.grad_UR
+            
+            self.solve()
+
+            #self.proj_trial()
+            #self.proj_complete_7()
+            #self.proj_complete_2()
+            #self.proj_complete()
+            
+
+            US1_1 = self.US1
+            #US2_1 = self.US2
+            UR_1 = self.UR
+
+            print('old',US1_old)
+            print('1', US1_1)
+            
+            self.US1 = US1_old
+            #self.US2 = US2_old
+            self.UR = UR_old
+            
+            self.solve()
+
+            k = 1
+            while (k <= 50):
+                print('US1')
+                print(self.US1)
+                self.US1 = US1_old - b * self.learning_rate *  self.grad_US1
+               # self.US2 = US2_old - b * self.learning_rate *  self.grad_US2#np.concatenate((np.zeros((self.Ns, 3)), self.US1[:,:-3]), axis = 1) #US2_old - b * self.learning_rate *  self.grad_US2
+                self.UR = UR_old - b * self.learning_rate *  self.grad_UR
+                #self.solve()
+                #print(self.US1)
+                #print(self.US2)
+                #print(self.UR)
+                #self.proj_complete_7()
+                #print('iter', self.US1)
+                
+                #self.proj_complete_2()
+                #self.proj_complete()
+                self.proj_trial_2()
+                self.solve()
+                J_new = self.cost_functional_2()
+                
+                print('J_new', J_new)
+                print('J_old', J_old)
+                print('diff', - self.learning_rate / b * (np.sum(np.sum((self.US1[self.ages_opt,:] - US1_old[self.ages_opt,:])**2)) + np.sum(np.sum((self.UR[self.ages_opt,:] - UR_old[self.ages_opt,:])**2))))
+                #print((J_new <= J_old - self.learning_rate / b * (np.sum(np.sum((self.US1[self.ages_opt,:] - US1_old[self.ages_opt,:])**2)) + np.sum(np.sum((self.UR[self.ages_opt,:] - UR_old[self.ages_opt,:])**2))+ np.sum(np.sum((self.US2[self.ages_opt,:] - US2_old[self.ages_opt,:])**2))))):
+                if (J_new <= (J_old - self.learning_rate / b * (np.sum(np.sum((self.US1[self.ages_opt,:] - US1_old[self.ages_opt,:])**2)) + np.sum(np.sum((self.UR[self.ages_opt,:] - UR_old[self.ages_opt,:])**2))))):
+                    print('Direzione ok')
+                    k = 52
+                else:
+                   #plt.plot(self.US1[0,:])
+                   #plt.plot(US1_old[0,:])
+                   #plt.show()
+
+                   #plt.plot(self.US1[1,:])
+                   #plt.plot(US1_old[1,:])
+                   #plt.show()
+
+                   #plt.plot(self.US1[2,:])
+                   #plt.plot(US1_old[2,:])
+                   #plt.show()
+
+                   #plt.plot(self.US1[3,:])
+                   #plt.plot(US1_old[3,:])
+                   #plt.show()
+
+                   #plt.plot(self.US1[4,:])
+                   #plt.plot(US1_old[4,:])
+                   #plt.show()
+
+                   #plt.plot(self.US1[5,:])
+                   #plt.plot(US1_old[5,:])
+                   #plt.show()
+
+                   #plt.plot(self.US2[0,:])
+                   #plt.plot(US2_old[0,:])
+                   #plt.show()
+
+                   #plt.plot(self.US2[1,:])
+                   #plt.plot(US2_old[1,:])
+                   #plt.show()
+
+                   #plt.plot(self.US2[2,:])
+                   #plt.plot(US2_old[2,:])
+                   #plt.show()
+
+                   #plt.plot(self.US2[3,:])
+                   #plt.plot(US2_old[3,:])
+                   #plt.show()
+
+                   #plt.plot(self.US2[4,:])
+                   #plt.plot(US2_old[4,:])
+                   #plt.show()
+
+                   #plt.plot(self.US2[5,:])
+                   #plt.plot(US2_old[5,:])
+                   #plt.show()
+
+                   #plt.plot(self.UR[0,:])
+                   #plt.plot(UR_old[0,:])
+                   #plt.show()
+
+                   #plt.plot(self.UR[1,:])
+                   #plt.plot(UR_old[1,:])
+                   #plt.show()
+
+                   #plt.plot(self.UR[2,:])
+                   #plt.plot(UR_old[2,:])
+                   #plt.show()
+
+                   #plt.plot(self.UR[3,:])
+                   #plt.plot(UR_old[3,:])
+                   #plt.show()
+
+                   #plt.plot(self.UR[4,:])
+                   #plt.plot(UR_old[4,:])
+                   #plt.show()
+
+                   #plt.plot(self.UR[5,:])
+                   #plt.plot(UR_old[5,:])
+                   #plt.show()
+                    k = k+1
+                    b = b /2 
+            print(k)
+                #sum_gradient += abs(grad_US1).sum() + abs(grad_US2).sum() + abs(grad_UR).sum()
+        #   fig, ax = plt.subplots(2,3) 
+        #   ax[0,0].plot(self.US1[0,:])
+        #   ax[0,0].plot(init_US1[0,:], '--')
+        #   ax[0,0].set_title('0-19')
+        #   ax[0,0].legend(['Mod', 'Init'])
+
+        #   ax[0,1].plot(self.US1[1,:])
+        #   ax[0,1].plot(init_US1[1,:], '--')
+        #   ax[0,1].set_title('20-39')
+        #   ax[0,1].legend(['Mod', 'Init'])
+        #   
+        #   ax[0,2].plot(self.US1[2,:])
+        #   ax[0,2].plot(init_US1[2,:], '--')
+        #   ax[0,2].set_title('40-59')
+        #   ax[0,2].legend(['Mod', 'Init'])
+        #   
+        #   ax[1,0].plot(self.US1[3,:])
+        #   ax[1,0].plot(init_US1[3,:], '--')
+        #   ax[1,0].set_title('60-79')
+        #   ax[1,0].legend(['Mod', 'Init'])
+        #   
+        #   ax[1,1].plot(self.US1[4,:])
+        #   ax[1,1].plot(init_US1[4,:], '--')
+        #   ax[1,1].set_title('80-89')
+        #   ax[1,1].legend(['Mod', 'Init'])
+        #   
+        #   ax[1,2].plot(self.US1[5,:])
+        #   ax[1,2].plot(init_US1[5,:], '--')
+        #   ax[1,2].set_title('90+')
+        #   ax[1,2].legend(['Mod', 'Init'])
+        #   plt.suptitle('US1')
+        #   plt.show()
+
+        #   fig, ax = plt.subplots(2,3) 
+        #   ax[0,0].plot(self.US2[0,:])
+        #   ax[0,0].plot(init_US2[0,:], '--')
+        #   ax[0,0].set_title('0-19')
+        #   ax[0,0].legend(['Mod', 'Init'])
+        #        
+        #   ax[0,1].plot(self.US2[1,:])
+        #   ax[0,1].plot(init_US2[1,:], '--')
+        #   ax[0,1].set_title('20-39')
+        #   ax[0,1].legend(['Mod', 'Init'])
+        #        
+        #   ax[0,2].plot(self.US2[2,:])
+        #   ax[0,2].plot(init_US2[2,:], '--')
+        #   ax[0,2].set_title('40-59')
+        #   ax[0,2].legend(['Mod', 'Init'])
+        #        
+        #   ax[1,0].plot(self.US2[3,:])
+        #   ax[1,0].plot(init_US2[3,:], '--')
+        #   ax[1,0].set_title('60-79')
+        #   ax[1,0].legend(['Mod', 'Init'])
+        #         
+        #   ax[1,1].plot(self.US2[4,:])
+        #   ax[1,1].plot(init_US2[4,:], '--')
+        #   ax[1,1].set_title('80-89')
+        #   ax[1,1].legend(['Mod', 'Init'])
+        #         
+        #   ax[1,2].plot(self.US2[5,:])
+        #   ax[1,2].plot(init_US2[5,:], '--')
+        #   ax[1,2].set_title('90+')
+        #   ax[1,2].legend(['Mod', 'Init'])
+        #   plt.suptitle('US2')
+        #   plt.show()
+
+        #   fig, ax = plt.subplots(2,3) 
+        #   ax[0,0].plot(self.UR[0,:])
+        #   ax[0,0].plot(init_UR[0,:], '--')
+        #   ax[0,0].set_title('0-19')
+        #   ax[0,0].legend(['Mod', 'Init'])
+        #        
+        #   ax[0,1].plot(self.UR[1,:])
+        #   ax[0,1].plot(init_UR[1,:], '--')
+        #   ax[0,1].set_title('20-39')
+        #   ax[0,1].legend(['Mod', 'Init'])
+        #        
+        #   ax[0,2].plot(self.UR[2,:])
+        #   ax[0,2].plot(init_UR[2,:], '--')
+        #   ax[0,2].set_title('40-59')
+        #   ax[0,2].legend(['Mod', 'Init'])
+        #        
+        #   ax[1,0].plot(self.UR[3,:])
+        #   ax[1,0].plot(init_UR[3,:], '--')
+        #   ax[1,0].set_title('60-79')
+        #   ax[1,0].legend(['Mod', 'Init'])
+        #        
+        #   ax[1,1].plot(self.UR[4,:])
+        #   ax[1,1].plot(init_UR[4,:], '--')
+        #   ax[1,1].set_title('80-89')
+        #   ax[1,1].legend(['Mod', 'Init'])
+        #        
+        #   ax[1,2].plot(self.UR[5,:])
+        #   ax[1,2].plot(init_UR[5,:], '--')
+        #   ax[1,2].set_title('90+')
+        #   ax[1,2].legend(['Mod', 'Init'])
+        #   plt.suptitle('UR')
+        #   plt.show()
+            
+            self.history_oc.append(J_new)
+            self.err_min = (np.sum(np.sum((self.US1 - US1_1)**2)) + np.sum(np.sum((self.UR - UR_1)**2)))# + np.sum(np.sum((self.US2 - US2_1)**2))#abs(sum_old - sum_gradient) / abs(sum_old)+ np.sum(np.sum((self.US2 - US2_1)**2)) 
+            print(self.err_min)
+            ep += 1
+            print('First check: ', ep <= self.stepsOC)
+            print('Second check: ', self.err_min > self.tol)
+            print('Iteration: ', ep)
+            print('Cost functional: ', self.history_oc[-1])
+            print('--------------------------------------------------------------')
+
+        print('End Loop...')
+        print('--------------------------------------------------------------')
+        fig, ax = plt.subplots(2,3) 
+        ax[0,0].plot(self.US1[0,:])
+        ax[0,0].plot(init_US1[0,:], '--')
+        ax[0,0].set_title('0-19')
+        ax[0,0].legend(['Mod', 'Init'])
+
+        ax[0,1].plot(self.US1[1,:])
+        ax[0,1].plot(init_US1[1,:], '--')
+        ax[0,1].set_title('20-39')
+        ax[0,1].legend(['Mod', 'Init'])
+        
+        ax[0,2].plot(self.US1[2,:])
+        ax[0,2].plot(init_US1[2,:], '--')
+        ax[0,2].set_title('40-59')
+        ax[0,2].legend(['Mod', 'Init'])
+        
+        ax[1,0].plot(self.US1[3,:])
+        ax[1,0].plot(init_US1[3,:], '--')
+        ax[1,0].set_title('60-79')
+        ax[1,0].legend(['Mod', 'Init'])
+        
+        ax[1,1].plot(self.US1[4,:])
+        ax[1,1].plot(init_US1[4,:], '--')
+        ax[1,1].set_title('80-89')
+        ax[1,1].legend(['Mod', 'Init'])
+        
+        ax[1,2].plot(self.US1[5,:])
+        ax[1,2].plot(init_US1[5,:], '--')
+        ax[1,2].set_title('90+')
+        ax[1,2].legend(['Mod', 'Init'])
+        plt.suptitle('US1')
+        plt.show()
+
+        fig, ax = plt.subplots(2,3) 
+        ax[0,0].plot(self.US2[0,:])
+        ax[0,0].plot(init_US2[0,:], '--')
+        ax[0,0].set_title('0-19')
+        ax[0,0].legend(['Mod', 'Init'])
+             
+        ax[0,1].plot(self.US2[1,:])
+        ax[0,1].plot(init_US2[1,:], '--')
+        ax[0,1].set_title('20-39')
+        ax[0,1].legend(['Mod', 'Init'])
+             
+        ax[0,2].plot(self.US2[2,:])
+        ax[0,2].plot(init_US2[2,:], '--')
+        ax[0,2].set_title('40-59')
+        ax[0,2].legend(['Mod', 'Init'])
+             
+        ax[1,0].plot(self.US2[3,:])
+        ax[1,0].plot(init_US2[3,:], '--')
+        ax[1,0].set_title('60-79')
+        ax[1,0].legend(['Mod', 'Init'])
+              
+        ax[1,1].plot(self.US2[4,:])
+        ax[1,1].plot(init_US2[4,:], '--')
+        ax[1,1].set_title('80-89')
+        ax[1,1].legend(['Mod', 'Init'])
+              
+        ax[1,2].plot(self.US2[5,:])
+        ax[1,2].plot(init_US2[5,:], '--')
+        ax[1,2].set_title('90+')
+        ax[1,2].legend(['Mod', 'Init'])
+        plt.suptitle('US2')
+        plt.show()
+
+        fig, ax = plt.subplots(2,3) 
+        ax[0,0].plot(self.UR[0,:])
+        ax[0,0].plot(init_UR[0,:], '--')
+        ax[0,0].set_title('0-19')
+        ax[0,0].legend(['Mod', 'Init'])
+             
+        ax[0,1].plot(self.UR[1,:])
+        ax[0,1].plot(init_UR[1,:], '--')
+        ax[0,1].set_title('20-39')
+        ax[0,1].legend(['Mod', 'Init'])
+             
+        ax[0,2].plot(self.UR[2,:])
+        ax[0,2].plot(init_UR[2,:], '--')
+        ax[0,2].set_title('40-59')
+        ax[0,2].legend(['Mod', 'Init'])
+             
+        ax[1,0].plot(self.UR[3,:])
+        ax[1,0].plot(init_UR[3,:], '--')
+        ax[1,0].set_title('60-79')
+        ax[1,0].legend(['Mod', 'Init'])
+             
+        ax[1,1].plot(self.UR[4,:])
+        ax[1,1].plot(init_UR[4,:], '--')
+        ax[1,1].set_title('80-89')
+        ax[1,1].legend(['Mod', 'Init'])
+             
+        ax[1,2].plot(self.UR[5,:])
+        ax[1,2].plot(init_UR[5,:], '--')
+        ax[1,2].set_title('90+')
+        ax[1,2].legend(['Mod', 'Init'])
+        plt.suptitle('UR')
+        plt.show()
+        return
+                                
+              
+    def estimate(self):
+        params0 = pm.maskParams( self.params.get() , self.params.getMask() )
+        lower_b = pm.maskParams( self.params.getLowerBounds() , self.params.getMask() )
+        upper_b = pm.maskParams( self.params.getUpperBounds() , self.params.getMask() )
+        bounds = Bounds( lower_b, upper_b )
+        
+        #local mimimization
+        result = minimize_parallel(self.error_LS, params0, bounds=bounds,\
+                options={'ftol': 1e-15, 'maxfun':1000, 'maxiter':1000,'iprint':1})
+        print('###########################################')
+        print(result)
+        print('###########################################')
+        # assign estimated parameters to model pparameters
+        self.params.params[self.params.getMask()] = result.x
+        return
+
+    def error(self, params0):
+        self.params.params[self.params.getMask()] = params0
+        self.solve()
+        S, I, R, D, V, W = self.Y[:,self.t_list]
+
+        # compute errors
+        # Flatten the solution arrays to match data format
+        
+        #error_I =  np.abs(I.flatten() - self.data['Infected'].values)#CAMBIARE SE MONOAGE 
+       # errorI = [error_I[i::self.Ns].sum() for i in range(self.Ns)]
+
+        error_D = np.absolute(D.flatten() - self.data['Deceased'].values) 
+        #errorD = [error_D[i::self.Ns].sum() for i in range(self.Ns)]
+        #print('ErrorI', errorI.shape)
+        # compute errors weights
+        one = np.ones(self.Ns)
+        weight = np.ones(self.Ns)
+        # modify this if you want to weight more specific time steps
+        #print(weight.shape)
+        #print(self.data['Infected'].shape)
+        #weightsI = weight#/np.maximum(max(self.data['Infected'].values),1)
+        weightsD = weight#/np.maximum(max(self.data['Deceased'].values), 1)
+        i = 0
+        #print('Eccoci', max(self.data[self.data.Age == '0-19'].Infected))
+        for age in ['0-19', '20-39', '40-59', '60-79', '80-89', '90+']:
+       #     weightsI[i] /= max(max(self.data[self.data.Age == age].Infected), 1)
+            #print(weightsD[i])
+            #weightsD[i] = weightsD[i]/max(max(self.data[self.data.Age == age].Deceased),1)
+            #weightsI[i] = np.clip(weightsI[i]/max(error_I[i::self.Ns]), 1, None)
+            weightsD[i] = np.clip(weightsD[i]/max(error_D[i::self.Ns]), 1, None)
+            i+=1
+        #error_Dtot = np.sum(error_D.reshape((self.Ns, self.t_list[-1]+1)), axis = 0)
+        error_Dtot = np.sum(error_D.reshape((self.Ns, self.t_list[-1]+1)), axis = 1)
+        #print(error_Dtot.shape)
+        weight_total_D = np.ones(error_Dtot.shape[0])
+        #print('WS', weight_total_D.shape)
+        #weight_total_D /= max(self.data.groupby(by = 'data').sum().Deceased)
+        weight_total_D = weightsD /  np.array([0.01, 0.01, 0.05, 1, 1,1])
+       # errorL2 = np.sum((np.array(errorI)*weightsI)**2 + (np.array(errorD)*weightsD)**2)# + np.sum((error_Dtot*weight_total_D)**2)
+        #errorL2 = np.sum((np.array(errorD*weightsD))**2)
+        #print(weightsD)
+        #print(errorD)
+        #print(weightsD)
+        #return
+        #errorL2 = 1e-2 * np.sum((np.array([error_I[i::self.Ns].sum() for i in range(self.Ns)])*weightsI)**2) + \
+        #errorL2 = np.sum((np.array([error_D[i::self.Ns].sum() for i in range(self.Ns)])*weightsD)**2) +  np.sum((error_Dtot*weight_total_D)**2)
+        errorL2 = np.sum((error_Dtot*weight_total_D)**2)
+        #print('D', D.flatten())
+        return errorL2
+    
+    def error_LS(self, params):
+        error = self.error(params)
+        return np.sqrt(error)
+
+    def error_MCMC(self, params, data):
+        Y0 = data.ydata[0].squeeze()
+        
+        self.Y0 = Y0.copy()
+        self.Y0[1] *= params[-2*self.Ns:-self.Ns]
+        self.Y0[2] *= params[-self.Ns:]
+        self.Y0[0] = self.Pop - self.Y0[1:].sum(axis=0)
+        #self.t_rec = params[-3*self.Ns:-2*self.Ns]
+        self.t_rec = params[-2*self.Ns-1:-2*self.Ns]
+        return self.error(params[:-2*self.Ns - 1])
+        #return self.error(params[:-2*self.Ns])#INCERTEZZA COMPARTIMENTI
+        #return self.error(params[:-3*self.Ns])
+
+    def computeRt(self):
+        nPhases = self.params.nPhases
+        nSites = self.params.nSites
+        self.Rt = np.zeros((len(self.t_list), nSites)).squeeze()
+        for i,t in enumerate(self.t_list):
+            beta,gamma, US1, US2, UR = self.params.params_time[t]
+            R0_tmp = beta / gamma
+            self.Rt[i] = R0_tmp * (self.Y[0] + self.sigma1 * self.Y[4] + self.sigma * self.Y[5]) / self.Pop
+        np.savetxt(self.out_path+'/Rt.csv', self.Rt, delimiter=',')
+        return
+
+    def save(self):
+        print('Reorganizing and saving results...')
+        # Sum undetected from base and variant
+        self.Y = self.Y[:,self.t_list]
+
+        Nc = self.Y.shape[0]
+        codes = np.tile(self.codes, len(self.t_list))
+        times = np.repeat(self.t_list, len(self.codes))
+        dates = [self.DPC_start + pd.Timedelta(t, 'days') for t in times]
+
+        results = np.zeros((Nc+3, len(times)), dtype='O')
+        US1_df = pd.DataFrame(self.US1,columns = [self.DPC_start + pd.Timedelta(7*t,'days') for t in range(self.t_contr)])
+        US2_df = pd.DataFrame(self.US2,columns = [self.DPC_start + pd.Timedelta(7*t,'days') for t in range(self.t_contr)])
+        UR_df = pd.DataFrame(self.UR,columns = [self.DPC_start + pd.Timedelta(7*t,'days') for t in range(self.t_contr)])
+        history_conv_df = pd.DataFrame(self.history_oc)
+
+        results[:3] = codes, dates, times
+        results[3:3+Nc] = self.Y.reshape(Nc, len(times))
+        
+        Code = "Age" if self.by_age else "Geocode"
+        results_df = pd.DataFrame(results.T,columns=[Code,'date','time','Suscept','Infected','Recovered', 'Deceased', 'VaccinatedFirst', 'VaccinatedSecond'])
+        
+        if not self.by_age:
+            results_df = results_df.astype({Code: int,"time": 'float64'})
+        else:
+            results_df = results_df.astype({Code: str,"time": 'float64'})
+
+        results_df = results_df.sort_values(by=[Code,'date'])
+        results_df = results_df.astype(dict(zip(['Suscept','Infected','Recovered', 'Deceased', 'VaccinatedFirst', 'VaccinatedSecond'],['float64']*6)))
+
+        outFileName = self.out_path+'/simdf.'+self.out_type
+        
+        if self.out_type == 'csv':
+            results_df.to_csv(outFileName,index=False)
+            US1_df.to_csv(self.out_path+'/US1.'+self.out_type, index=False)
+            US2_df.to_csv(self.out_path+'/US2.'+self.out_type, index=False)
+            UR_df.to_csv(self.out_path+'/UR.'+self.out_type, index=False)
+            history_conv_df.to_csv(self.out_path+'/history_conv.'+self.out_type, index=False)
+
+        elif self.out_type == 'h5':
+            results_df.to_hdf(outFileName, key='results_df', mode='w')
+            US1_df.to_hdf(self.out_path+'/US1.'+self.out_type, key='US1_df', mode='w')
+            US2_df.to_hdf(self.out_path+'/US2.'+self.out_type, key='US2_df', mode='w')
+            US1_df.to_hdf(self.out_path+'/UR.'+self.out_type, key='UR_df', mode='w')
+            history_conv_df.to_hdf(self.out_path+'/history_conv.'+self.out_type, key='history_conv_df', mode='w')
+
+        print('...done!')
+
+        return
+
+    def plot_Rt_vs_ISS(self):
+        day_init = self.DPC_start
+        day_end = self.DPC_start + pd.Timedelta(t_list[-1], 'days')
+        Rt_ISS = pd.read_csv('https://raw.githubusercontent.com/giovanniardenghi/iss-rt-data/main/data/iss_rt.csv')
+        Rt_ISS['Data'] = pd.to_datetime(Rt_ISS.Data)
+        Rt_ISS.set_index('Data',inplace=True)
+        plt.plot(pd.date_range(day_init+pd.Timedelta(self.t_list[0],'days'), day_end), self.Rt, linewidth = 4, label = 'Rt SIRDVW')
+        plt.plot(Rt_ISS[day_init:day_end].index,Rt_ISS[day_init:day_end], linewidth = 4, label = 'Rt ISS' )
+        plt.legend(fontsize=20)
+        fig = plt.gcf()
+        ax = plt.gca()
+        ax.tick_params(axis='both', which='major', labelsize='large')
+        ax.xaxis.set_major_locator(mpl.dates.DayLocator(interval=10))
+        ax.xaxis.set_major_formatter(mpl.dates.DateFormatter('%d %b'))
+        fig.set_size_inches((19.2, 10.8), forward=False)
+        plt.savefig(out_path + '/Rt_plot.png', dpi=300)
+        plt.close()
+        return

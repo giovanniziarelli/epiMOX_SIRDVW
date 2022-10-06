@@ -1,0 +1,17 @@
+{
+	"Delta":
+		{
+			"factor":1.5,
+			"kappa1":0.66,
+			"kappa2":0.93
+		},
+	"Omicron":
+		{
+			"factor":1.4,
+			"kappa1":1,
+			"kappa2":1,
+			"kappa2p":0.82,
+			"xi_H":0.75,
+			"xi_T":0.75
+		}
+}
